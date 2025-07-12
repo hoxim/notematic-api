@@ -43,7 +43,7 @@ jobs:
         override: true
 
     - name: Cache Rust dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -73,7 +73,7 @@ jobs:
         tar -czf notematic-api.tar.gz release/
 
     - name: Upload build artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: notematic-api-build
         path: notematic-api/notematic-api.tar.gz
@@ -87,7 +87,7 @@ jobs:
     
     steps:
     - name: Download build artifact
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: notematic-api-build
 
@@ -134,7 +134,7 @@ jobs:
         ./test-connection.sh
 
     - name: Deploy to server
-      uses: appleboy/ssh-action@v1.0.0
+      uses: appleboy/ssh-action@v1.2.2
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USERNAME }}
@@ -271,7 +271,7 @@ jobs:
           /tmp/deploy.sh
 
     - name: Verify deployment
-      uses: appleboy/ssh-action@v1.0.0
+      uses: appleboy/ssh-action@v1.2.2
       with:
         host: ${{ secrets.SERVER_HOST }}
         username: ${{ secrets.SERVER_USERNAME }}
