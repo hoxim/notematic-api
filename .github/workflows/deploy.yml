@@ -54,17 +54,17 @@ jobs:
           ${{ runner.os }}-cargo-
 
     - name: Build API
-      working-directory: notematic-api
+      working-directory: .
       run: |
         cargo build --release
 
     - name: Run tests
-      working-directory: notematic-api
+      working-directory: .
       run: cargo test
       continue-on-error: ${{ github.event.inputs.force_deploy == 'true' }}
 
     - name: Create release artifact
-      working-directory: notematic-api
+      working-directory: .
       run: |
         mkdir -p release
         cp target/release/notematic-api release/
@@ -76,7 +76,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: notematic-api-build
-        path: notematic-api/notematic-api.tar.gz
+        path: notematic-api.tar.gz
 
   deploy:
     needs: build
