@@ -44,7 +44,7 @@ async fn main() -> std::io::Result<()> {
             .configure(routes::configure_public_routes) // public routes
             .configure(handlers::configure_routes) // endpoint /users/{username}
     })
-    .bind(("127.0.0.1", port.parse::<u16>().unwrap()))?
+    .bind(("0.0.0.0", port.parse::<u16>().unwrap()))?
     .run()
     .await
 }

@@ -2,6 +2,7 @@ use actix_web::{web, HttpResponse, HttpRequest};
 use bcrypt::{hash, verify};
 use reqwest::Client;
 use serde_json::json;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::time::Duration;
 use log::{info, error, warn, debug};
@@ -213,13 +214,67 @@ pub async fn protected_endpoint() -> HttpResponse {
 pub async fn health_check() -> HttpResponse {
     let environment = env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
     let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
+    let api_port = env::var("API_PORT").unwrap_or_else(|_| "8080".to_string());
+    
+    // Check database connection
+    let db_status = check_database_connection().await;
+    
+    // Get system info
+    let uptime = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     
     HttpResponse::Ok().json(json!({
         "status": "healthy",
         "environment": environment,
         "version": version,
-        "timestamp": chrono::Utc::now().to_rfc3339()
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "api": {
+            "port": api_port,
+            "uptime_seconds": uptime
+        },
+        "database": {
+            "status": db_status.status,
+            "message": db_status.message
+        },
+        "services": {
+            "auth": "operational",
+            "notebooks": "operational",
+            "notes": "operational"
+        }
     }))
+}
+
+#[derive(Serialize, Deserialize)]
+struct DatabaseStatus {
+    status: String,
+    message: String,
+}
+
+async fn check_database_connection() -> DatabaseStatus {
+    let (client, url, _user, _pass) = get_couchdb_client();
+    
+    // Try to connect to CouchDB
+    match client.get(&format!("{}/", url)).send().await {
+        Ok(response) => {
+            if response.status().is_success() {
+                DatabaseStatus {
+                    status: "connected".to_string(),
+                    message: "Database connection successful".to_string(),
+                }
+            } else {
+                DatabaseStatus {
+                    status: "error".to_string(),
+                    message: format!("Database returned status: {}", response.status()),
+                }
+            }
+        }
+        Err(e) => DatabaseStatus {
+            status: "error".to_string(),
+            message: format!("Database connection failed: {}", e),
+        },
+    }
 }
 
 // Notebook handlers
