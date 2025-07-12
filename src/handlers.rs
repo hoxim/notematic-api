@@ -210,6 +210,18 @@ pub async fn protected_endpoint() -> HttpResponse {
     HttpResponse::Ok().json(json!({"message": "Access granted"}))
 }
 
+pub async fn health_check() -> HttpResponse {
+    let environment = env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
+    let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
+    
+    HttpResponse::Ok().json(json!({
+        "status": "healthy",
+        "environment": environment,
+        "version": version,
+        "timestamp": chrono::Utc::now().to_rfc3339()
+    }))
+}
+
 // Notebook handlers
 pub async fn create_notebook_handler(notebook: web::Json<Notebook>, req: HttpRequest) -> HttpResponse {
     // Rate limiting - 10 requests per minute for notebook creation

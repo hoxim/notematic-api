@@ -1,12 +1,16 @@
 use actix_web::web;
 use crate::handlers::{
-    register, login, refresh_token, protected_endpoint,
+    register, login, refresh_token, protected_endpoint, health_check,
     create_notebook_handler, get_notebooks_handler,
     create_note_handler, get_notes_handler
 };
 
 pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
+        web::resource("/health")
+            .route(web::get().to(health_check))
+    )
+    .service(
         web::resource("/register")
             .route(web::post().to(register))
     )

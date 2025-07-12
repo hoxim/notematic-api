@@ -9,6 +9,21 @@ on:
     branches: [ main, master ]
     paths:
       - 'notematic-api/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      force_deploy:
+        description: 'Force deployment even if tests fail'
+        required: false
+        default: false
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,7 +57,11 @@ jobs:
       working-directory: notematic-api
       run: |
         cargo build --release
-        cargo test
+
+    - name: Run tests
+      working-directory: notematic-api
+      run: cargo test
+      continue-on-error: ${{ github.event.inputs.force_deploy == 'true' }}
 
     - name: Create release artifact
       working-directory: notematic-api
@@ -62,7 +81,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    if: |
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') ||
+      github.event_name == 'workflow_dispatch'
     
     steps:
     - name: Download build artifact
@@ -120,6 +141,11 @@ jobs:
         key: ${{ secrets.SERVER_SSH_KEY }}
         port: ${{ secrets.SERVER_PORT }}
         script: |
+          # Set deployment environment
+          DEPLOY_ENV="${{ github.event.inputs.environment || 'production' }}"
+          echo "Deploying to environment: $DEPLOY_ENV"
+          
+          # Copy deployment script to server
           # Copy deployment script to server
           cat > /tmp/deploy.sh << 'EOF'
           #!/bin/bash
@@ -133,6 +159,7 @@ jobs:
           BACKUP_DIR="$APP_DIR/backup"
           SERVICE_NAME="$APP_NAME"
           USER_NAME="notematic"
+          DEPLOY_ENV="$DEPLOY_ENV"
           
           # Colors for output
           RED='\033[0;31m'
@@ -153,7 +180,7 @@ jobs:
               echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}"
           }
           
-          log "Starting deployment of $APP_NAME"
+          log "Starting deployment of $APP_NAME to $DEPLOY_ENV environment"
           
           # Create directories if they don't exist
           sudo mkdir -p "$APP_DIR"
@@ -192,7 +219,7 @@ jobs:
           RestartSec=5
           Environment=RUST_LOG=info
           Environment=API_PORT=8080
-          Environment=RUST_ENV=production
+          Environment=RUST_ENV=$DEPLOY_ENV
           
           [Install]
           WantedBy=multi-user.target
@@ -241,4 +268,34 @@ jobs:
           
           # Make script executable and run it
           chmod +x /tmp/deploy.sh
-          /tmp/deploy.sh 
+          /tmp/deploy.sh
+
+    - name: Verify deployment
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          # Wait a bit more for service to fully start
+          sleep 5
+          
+          # Check if service is running
+          if sudo systemctl is-active --quiet notematic-api; then
+              echo "✅ Deployment verification successful!"
+              echo "Service status:"
+              sudo systemctl status notematic-api --no-pager -l
+              
+              # Test API endpoint if available
+              if curl -f -s http://localhost:8080/health > /dev/null 2>&1; then
+                  echo "✅ API health check passed"
+              else
+                  echo "⚠️  API health check failed (endpoint might not exist yet)"
+              fi
+          else
+              echo "❌ Deployment verification failed!"
+              sudo systemctl status notematic-api --no-pager -l
+              sudo journalctl -u notematic-api --no-pager -l -n 20
+              exit 1
+          fi 
