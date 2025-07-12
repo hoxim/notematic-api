@@ -215,6 +215,8 @@ pub async fn health_check() -> HttpResponse {
     let environment = env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
     let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
     let api_port = env::var("API_PORT").unwrap_or_else(|_| "8080".to_string());
+    let build_hash = env::var("GIT_COMMIT_HASH").unwrap_or_else(|_| "unknown".to_string());
+    let build_date = env::var("BUILD_DATE").unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
     
     // Check database connection
     let db_status = check_database_connection().await;
@@ -229,6 +231,10 @@ pub async fn health_check() -> HttpResponse {
         "status": "healthy",
         "environment": environment,
         "version": version,
+        "build": {
+            "hash": build_hash,
+            "date": build_date
+        },
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "api": {
             "port": api_port,

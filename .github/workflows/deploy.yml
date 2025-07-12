@@ -44,7 +44,20 @@ jobs:
     - name: Build API
       working-directory: .
       run: |
+        # Get git info for versioning
+        export GIT_COMMIT_HASH=$(git rev-parse --short HEAD)
+        export BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        
+        # Build with version info
         cargo build --release
+        
+        echo "Build info:"
+        echo "  Hash: $GIT_COMMIT_HASH"
+        echo "  Date: $BUILD_DATE"
+        
+        # Save for deploy job
+        echo "GIT_COMMIT_HASH=$GIT_COMMIT_HASH" >> $GITHUB_ENV
+        echo "BUILD_DATE=$BUILD_DATE" >> $GITHUB_ENV
 
     - name: Run tests
       working-directory: .
@@ -138,6 +151,8 @@ jobs:
           Environment=RUST_LOG=info
           Environment=API_PORT=8080
           Environment=RUST_ENV=production
+          Environment=GIT_COMMIT_HASH=${{ env.GIT_COMMIT_HASH || 'unknown' }}
+          Environment=BUILD_DATE=${{ env.BUILD_DATE || 'unknown' }}
           
           [Install]
           WantedBy=multi-user.target
