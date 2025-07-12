@@ -14,6 +14,44 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# Logs and debugging
+*.log
+logs/
+debug/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Database files (if using local databases)
+*.db
+*.sqlite
+*.sqlite3
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

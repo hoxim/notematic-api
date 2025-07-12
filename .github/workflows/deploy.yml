@@ -1,0 +1,244 @@
+name: Build and Deploy API
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'notematic-api/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'notematic-api/**'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Cache Rust dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          notematic-api/target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Build API
+      working-directory: notematic-api
+      run: |
+        cargo build --release
+        cargo test
+
+    - name: Create release artifact
+      working-directory: notematic-api
+      run: |
+        mkdir -p release
+        cp target/release/notematic-api release/
+        cp Cargo.toml release/
+        cp -r src release/
+        tar -czf notematic-api.tar.gz release/
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: notematic-api-build
+        path: notematic-api/notematic-api.tar.gz
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+    - name: Download build artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: notematic-api-build
+
+    - name: Test server connection
+      run: |
+        # Create test script
+        cat > test-connection.sh << 'EOF'
+        #!/bin/bash
+        set -e
+        
+        # Colors for output
+        RED='\033[0;31m'
+        GREEN='\033[0;32m'
+        YELLOW='\033[1;33m'
+        NC='\033[0m'
+        
+        log() {
+            echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+        }
+        
+        error() {
+            echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}"
+        }
+        
+        # Test SSH connection
+        log "Testing SSH connection..."
+        SSH_KEY_FILE=$(mktemp)
+        echo "${{ secrets.SERVER_SSH_KEY }}" > "$SSH_KEY_FILE"
+        chmod 600 "$SSH_KEY_FILE"
+        
+        if ssh -i "$SSH_KEY_FILE" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${{ secrets.SERVER_PORT }} ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} "echo 'SSH connection successful'"; then
+            log "SSH connection test passed"
+        else
+            error "SSH connection test failed"
+            rm -f "$SSH_KEY_FILE"
+            exit 1
+        fi
+        
+        rm -f "$SSH_KEY_FILE"
+        log "Server connection test completed"
+        EOF
+        
+        chmod +x test-connection.sh
+        ./test-connection.sh
+
+    - name: Deploy to server
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USERNAME }}
+        key: ${{ secrets.SERVER_SSH_KEY }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          # Copy deployment script to server
+          cat > /tmp/deploy.sh << 'EOF'
+          #!/bin/bash
+          
+          # Deployment script for Notematic API
+          set -e
+          
+          # Configuration
+          APP_NAME="notematic-api"
+          APP_DIR="/opt/$APP_NAME"
+          BACKUP_DIR="$APP_DIR/backup"
+          SERVICE_NAME="$APP_NAME"
+          USER_NAME="notematic"
+          
+          # Colors for output
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          NC='\033[0m'
+          
+          # Logging function
+          log() {
+              echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+          }
+          
+          warn() {
+              echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1${NC}"
+          }
+          
+          error() {
+              echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}"
+          }
+          
+          log "Starting deployment of $APP_NAME"
+          
+          # Create directories if they don't exist
+          sudo mkdir -p "$APP_DIR"
+          sudo mkdir -p "$BACKUP_DIR"
+          
+          # Stop the service if it's running
+          log "Stopping $SERVICE_NAME service..."
+          sudo systemctl stop "$SERVICE_NAME" || warn "Service was not running"
+          
+          # Create backup of current version
+          if [ -f "$APP_DIR/$APP_NAME" ]; then
+              log "Creating backup of current version..."
+              sudo cp "$APP_DIR/$APP_NAME" "$BACKUP_DIR/$APP_NAME.$(date +%Y%m%d_%H%M%S)"
+          fi
+          
+          # Extract new version
+          log "Extracting new version..."
+          cd "$APP_DIR"
+          sudo tar -xzf notematic-api.tar.gz
+          sudo cp release/notematic-api .
+          sudo chmod +x notematic-api
+          
+          # Create systemd service file
+          log "Creating systemd service..."
+          sudo tee /etc/systemd/system/"$SERVICE_NAME".service > /dev/null <<SERVICEEOF
+          [Unit]
+          Description=Notematic API
+          After=network.target
+          
+          [Service]
+          Type=simple
+          User=$USER_NAME
+          WorkingDirectory=$APP_DIR
+          ExecStart=$APP_DIR/notematic-api
+          Restart=always
+          RestartSec=5
+          Environment=RUST_LOG=info
+          Environment=API_PORT=8080
+          Environment=RUST_ENV=production
+          
+          [Install]
+          WantedBy=multi-user.target
+          SERVICEEOF
+          
+          # Create user if not exists
+          log "Setting up user..."
+          sudo useradd -r -s /bin/false "$USER_NAME" || warn "User $USER_NAME already exists"
+          
+          # Set proper permissions
+          log "Setting permissions..."
+          sudo chown -R "$USER_NAME:$USER_NAME" "$APP_DIR"
+          
+          # Reload systemd and start service
+          log "Starting service..."
+          sudo systemctl daemon-reload
+          sudo systemctl enable "$SERVICE_NAME"
+          sudo systemctl start "$SERVICE_NAME"
+          
+          # Wait a moment for service to start
+          sleep 3
+          
+          # Check service status
+          log "Checking service status..."
+          if sudo systemctl is-active --quiet "$SERVICE_NAME"; then
+              log "Service is running successfully!"
+              sudo systemctl status "$SERVICE_NAME" --no-pager -l
+          else
+              error "Service failed to start!"
+              sudo systemctl status "$SERVICE_NAME" --no-pager -l
+              sudo journalctl -u "$SERVICE_NAME" --no-pager -l -n 20
+              exit 1
+          fi
+          
+          # Cleanup
+          log "Cleaning up..."
+          sudo rm -rf release notematic-api.tar.gz
+          
+          # Keep only last 5 backups
+          log "Cleaning old backups..."
+          cd "$BACKUP_DIR"
+          sudo ls -t | tail -n +6 | sudo xargs -r rm
+          
+          log "Deployment completed successfully!"
+          EOF
+          
+          # Make script executable and run it
+          chmod +x /tmp/deploy.sh
+          /tmp/deploy.sh 

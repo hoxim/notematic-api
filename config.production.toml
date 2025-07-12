@@ -1,0 +1,22 @@
+# Production environment configuration
+[server]
+port = 8080
+host = "0.0.0.0"
+
+[environment]
+rust_env = "production"
+rust_log = "info"
+
+[database]
+couchdb_url = "http://localhost:5984"
+couchdb_username = "admin"
+couchdb_password = "your_secure_password"
+
+[jwt]
+secret = "your_super_secure_jwt_secret_key_here"
+access_expiry = 3600
+refresh_expiry = 2592000
+
+[rate_limit]
+requests = 100
+window = 900 

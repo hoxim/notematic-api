@@ -1,4 +1,7 @@
-use actix_web::{App, HttpServer, middleware as actix_middleware}; // Alias dla middleware z Actix Web
+use actix_web::{App, HttpServer, middleware as actix_middleware}; // Alias for Actix Web's built-in middleware
+use actix_cors::Cors;
+use log::info;
+
 use actix_web::web::{self};
 use dotenv::dotenv;
 use std::env;
@@ -9,16 +12,30 @@ mod handlers;
 mod utils;
 mod middleware;
 
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // Initialize logging
+    env_logger::init();
+    
     dotenv().ok(); // load vars form .env
     let port = env::var("API_PORT").unwrap_or_else(|_| "8080".to_string());
 
-    println!("Starting server at http://localhost:{}", port);
+    info!("Starting Notematic API server");
+    info!("Server will be available at http://localhost:{}", port);
+    info!("Environment: {}", env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string()));
+    HttpServer::new(move || {
+        // Configure CORS
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .supports_credentials();
 
-    HttpServer::new(|| {
         App::new()
+            .wrap(cors)
             .wrap(actix_middleware::Logger::default()) // Logger for routes
+
             .service(
                 web::scope("/protected") // Middleware only for protected routes
                     .wrap(middleware::JwtMiddlewareFactory)

@@ -1,5 +1,9 @@
 use actix_web::web;
-use crate::handlers::{register, login, protected_endpoint};
+use crate::handlers::{
+    register, login, refresh_token, protected_endpoint,
+    create_notebook_handler, get_notebooks_handler,
+    create_note_handler, get_notes_handler
+};
 
 pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -9,6 +13,10 @@ pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/login")
             .route(web::post().to(login))
+    )
+    .service(
+        web::resource("/refresh")
+            .route(web::post().to(refresh_token))
     );
 }
 
@@ -16,5 +24,15 @@ pub fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/protected")
             .route(web::get().to(protected_endpoint))
+    )
+    .service(
+        web::resource("/notebooks")
+            .route(web::post().to(create_notebook_handler))
+            .route(web::get().to(get_notebooks_handler))
+    )
+    .service(
+        web::resource("/notebooks/{notebook_id}/notes")
+            .route(web::post().to(create_note_handler))
+            .route(web::get().to(get_notes_handler))
     );
 }
