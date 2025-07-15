@@ -3,7 +3,6 @@ use crate::handlers::{
     register, login, refresh_token, protected_endpoint, health_check,
     create_notebook_handler, get_notebooks_handler,
     create_note_handler, get_notes_handler,
-    login_google
 };
 
 pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
@@ -18,10 +17,6 @@ pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/login")
             .route(web::post().to(login))
-    )
-    .service(
-        web::resource("/login/google")
-            .route(web::post().to(login_google))
     )
     .service(
         web::resource("/refresh")

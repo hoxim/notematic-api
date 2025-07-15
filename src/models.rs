@@ -3,14 +3,14 @@ use serde::{Deserialize, Serialize};
 ///user model
 #[derive(Debug, Serialize, Deserialize)]
 pub struct User {
-    pub username: String,
+    pub email: String,
     pub password: String,
 }
 
 ///Login Request model
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginRequest {
-    pub username: String,
+    pub email: String,
     pub password: String,
 }
 

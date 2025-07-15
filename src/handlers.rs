@@ -7,6 +7,7 @@ use std::env;
 use std::time::Duration;
 use log::{info, error, warn, debug};
 use uuid::Uuid;
+use regex::Regex;
 
 use crate::models::{User, LoginRequest, TokenResponse, RefreshTokenRequest, Notebook, Note};
 use crate::utils::{
@@ -35,7 +36,7 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
         .unwrap_or_else(|| "unknown".to_string());
     
     info!("Registration attempt from IP: {}", peer_addr);
-    debug!("Registration data: username={}", user.username);
+    debug!("Registration data: email={}", user.email);
     
     // Rate limiting - 5 requests per minute for registration
     if !check_rate_limit(&peer_addr, 5, Duration::from_secs(60)) {
@@ -46,23 +47,29 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
         }));
     }
 
-    if let Err(err) = validate_user_input(&user.username, &user.password) {
-        warn!("Invalid user input: {}", err);
-        return HttpResponse::BadRequest().json(json!({"error": err}));
+    // Walidacja formatu emaila
+    let email_regex = Regex::new(r"^[^@\s]+@[^@\s]+\.[^@\s]+$").unwrap();
+    if !email_regex.is_match(&user.email) {
+        return HttpResponse::BadRequest().json(json!({"error": "Invalid email format"}));
+    }
+
+    if user.password.len() < 8 {
+        return HttpResponse::BadRequest().json(json!({"error": "Password must be at least 8 characters long"}));
     }
 
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
 
+    // Sprawdź unikalność emaila (po _id)
     let check_response = client
-        .get(format!("{}/users/{}", couchdb_url, user.username))
+        .get(format!("{}/users/{}", couchdb_url, user.email))
         .basic_auth(couchdb_user.clone(), Some(couchdb_password.clone()))
         .send()
         .await;
 
     if let Ok(res) = check_response {
         if res.status().is_success() {
-            warn!("User already exists: {}", user.username);
-            return HttpResponse::Conflict().json(json!({"error": "User already exists"}));
+            warn!("Email already exists: {}", user.email);
+            return HttpResponse::Conflict().json(json!({"error": "Email already in use"}));
         }
     }
 
@@ -70,15 +77,15 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
     debug!("Password hashed successfully");
 
     let user_data = json!({
-        "_id": user.username.clone(),
-        "username": user.username.clone(),
-        "password": hashed_password,
+        "_id": user.email.clone(),
+        "email": user.email.clone(),
+        "password": hashed_password
     });
 
     debug!("Sending data to CouchDB: {:?}", user_data);
 
     let response = client
-        .put(format!("{}/users/{}", couchdb_url, user.username))
+        .put(format!("{}/users/{}", couchdb_url, user.email))
         .basic_auth(couchdb_user, Some(couchdb_password))
         .json(&user_data)
         .send()
@@ -86,11 +93,11 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
 
     match response {
         Ok(res) if res.status().is_success() => {
-            info!("User registered successfully: {}", user.username);
+            info!("User registered successfully: {}", user.email);
             
             // Generate tokens for the newly registered user
-            let access_token = generate_access_token(&user.username);
-            let refresh_token = generate_refresh_token(&user.username);
+            let access_token = generate_access_token(&user.email);
+            let refresh_token = generate_refresh_token(&user.email);
             
             let token_response = TokenResponse {
                 access_token,
@@ -118,7 +125,7 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
         .map(|addr| addr.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string());
     
-    info!("Login attempt from IP: {} for user: {}", peer_addr, credentials.username);
+    info!("Login attempt from IP: {} for email: {}", peer_addr, credentials.email);
     
     // Rate limiting - 10 requests per minute for login
     if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
@@ -135,7 +142,7 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
 
     let client = Client::new();
     let response = client
-        .get(format!("{}/users/{}", couchdb_url, credentials.username))
+        .get(format!("{}/users/{}", couchdb_url, credentials.email))
         .basic_auth(couchdb_user, Some(couchdb_password))
         .send()
         .await;
@@ -146,8 +153,8 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
             let stored_password = user_data["password"].as_str().unwrap();
 
             if verify(&credentials.password, stored_password).unwrap() {
-                let access_token = generate_access_token(&credentials.username);
-                let refresh_token = generate_refresh_token(&credentials.username);
+                let access_token = generate_access_token(&credentials.email);
+                let refresh_token = generate_refresh_token(&credentials.email);
                 
                 let token_response = TokenResponse {
                     access_token,
@@ -163,52 +170,6 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
         }
         Ok(_) => HttpResponse::Unauthorized().json(json!({"error": "User not found"})),
         Err(err) => HttpResponse::InternalServerError().json(json!({"error": err.to_string()})),
-    }
-}
-
-pub async fn login_google(google_req: web::Json<GoogleLoginRequest>) -> HttpResponse {
-    let id_token = &google_req.id_token;
-    // Weryfikacja tokena przez Google API
-    let verify_url = format!("https://oauth2.googleapis.com/tokeninfo?id_token={}", id_token);
-    let client = reqwest::Client::new();
-    let resp = client.get(&verify_url).send().await;
-    if let Ok(response) = resp {
-        if response.status().is_success() {
-            let google_info: serde_json::Value = response.json().await.unwrap_or_default();
-            let email = google_info["email"].as_str().unwrap_or("");
-            let sub = google_info["sub"].as_str().unwrap_or("");
-            if email.is_empty() || sub.is_empty() {
-                return HttpResponse::Unauthorized().json(json!({"error": "Invalid Google token"}));
-            }
-            // Użyj email jako username
-            let username = email;
-            // Sprawdź czy użytkownik istnieje, jeśli nie - utwórz
-            let user_opt = crate::utils::find_user_in_database(username).await;
-            if user_opt.is_none() {
-                // Utwórz użytkownika z losowym hasłem (nie będzie używane)
-                let new_user = crate::models::User {
-                    username: username.to_string(),
-                    password: Uuid::new_v4().to_string(),
-                };
-                // Dodaj do bazy
-                let _ = crate::utils::find_user_in_database(&new_user.username).await;
-                // (opcjonalnie: możesz dodać tu rejestrację do bazy, jeśli nie istnieje)
-            }
-            // Wygeneruj JWT
-            let access_token = generate_access_token(username);
-            let refresh_token = generate_refresh_token(username);
-            let token_response = TokenResponse {
-                access_token,
-                refresh_token,
-                token_type: "Bearer".to_string(),
-                expires_in: 3600,
-            };
-            return HttpResponse::Ok().json(token_response);
-        } else {
-            return HttpResponse::Unauthorized().json(json!({"error": "Invalid Google token"}));
-        }
-    } else {
-        return HttpResponse::InternalServerError().json(json!({"error": "Failed to verify Google token"}));
     }
 }
 
