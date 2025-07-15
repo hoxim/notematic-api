@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::time::Duration;
 use log::{info, error, warn, debug};
+use uuid::Uuid;
 
 use crate::models::{User, LoginRequest, TokenResponse, RefreshTokenRequest, Notebook, Note};
 use crate::utils::{
@@ -22,6 +23,11 @@ use crate::utils::{
     create_note,
     get_notebook_notes
 };
+
+#[derive(Deserialize)]
+pub struct GoogleLoginRequest {
+    pub id_token: String,
+}
 
 pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
     let peer_addr = req.peer_addr()
@@ -160,6 +166,52 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
     }
 }
 
+pub async fn login_google(google_req: web::Json<GoogleLoginRequest>) -> HttpResponse {
+    let id_token = &google_req.id_token;
+    // Weryfikacja tokena przez Google API
+    let verify_url = format!("https://oauth2.googleapis.com/tokeninfo?id_token={}", id_token);
+    let client = reqwest::Client::new();
+    let resp = client.get(&verify_url).send().await;
+    if let Ok(response) = resp {
+        if response.status().is_success() {
+            let google_info: serde_json::Value = response.json().await.unwrap_or_default();
+            let email = google_info["email"].as_str().unwrap_or("");
+            let sub = google_info["sub"].as_str().unwrap_or("");
+            if email.is_empty() || sub.is_empty() {
+                return HttpResponse::Unauthorized().json(json!({"error": "Invalid Google token"}));
+            }
+            // Użyj email jako username
+            let username = email;
+            // Sprawdź czy użytkownik istnieje, jeśli nie - utwórz
+            let user_opt = crate::utils::find_user_in_database(username).await;
+            if user_opt.is_none() {
+                // Utwórz użytkownika z losowym hasłem (nie będzie używane)
+                let new_user = crate::models::User {
+                    username: username.to_string(),
+                    password: Uuid::new_v4().to_string(),
+                };
+                // Dodaj do bazy
+                let _ = crate::utils::find_user_in_database(&new_user.username).await;
+                // (opcjonalnie: możesz dodać tu rejestrację do bazy, jeśli nie istnieje)
+            }
+            // Wygeneruj JWT
+            let access_token = generate_access_token(username);
+            let refresh_token = generate_refresh_token(username);
+            let token_response = TokenResponse {
+                access_token,
+                refresh_token,
+                token_type: "Bearer".to_string(),
+                expires_in: 3600,
+            };
+            return HttpResponse::Ok().json(token_response);
+        } else {
+            return HttpResponse::Unauthorized().json(json!({"error": "Invalid Google token"}));
+        }
+    } else {
+        return HttpResponse::InternalServerError().json(json!({"error": "Failed to verify Google token"}));
+    }
+}
+
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/users/{username}").route(web::get().to(get_user)));
 }
@@ -213,20 +265,19 @@ pub async fn protected_endpoint() -> HttpResponse {
 
 pub async fn health_check() -> HttpResponse {
     let environment = env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
-    let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
+    let version_base = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
+    let patch = env::var("API_PATCH_VERSION").unwrap_or_else(|_| "0".to_string());
+    let version = format!("{}.{}", version_base.trim_end_matches(",0"), patch);
     let api_port = env::var("API_PORT").unwrap_or_else(|_| "8080".to_string());
     let build_hash = env::var("GIT_COMMIT_HASH").unwrap_or_else(|_| "unknown".to_string());
     let build_date = env::var("BUILD_DATE").unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
-    
     // Check database connection
     let db_status = check_database_connection().await;
-    
     // Get system info
     let uptime = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    
     HttpResponse::Ok().json(json!({
         "status": "healthy",
         "environment": environment,
