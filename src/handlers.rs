@@ -8,8 +8,9 @@ use std::time::Duration;
 use log::{info, error, warn, debug};
 use uuid::Uuid;
 use regex::Regex;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
+use std::path::Path;
 
 use crate::models::{User, LoginRequest, TokenResponse, RefreshTokenRequest, Notebook, Note};
 use crate::utils::{
@@ -520,21 +521,46 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
 
 /// Handler for /admin/logs (admin only)
 pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
-    let log_path = "./logs/api.log";
-    info!("[admin_logs_handler] Attempt to fetch logs from {}", log_path);
-    let lines: Vec<String> = if let Ok(file) = File::open(log_path) {
-        let reader = BufReader::new(file);
-        let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
-        let total = all_lines.len();
-        let result = if total > 100 {
-            all_lines[total - 100..].to_vec()
+    let logs_dir = "./logs";
+    let pattern = "api_";
+    let mut newest_path: Option<std::path::PathBuf> = None;
+    let mut newest_mtime = std::time::UNIX_EPOCH;
+    if let Ok(entries) = fs::read_dir(logs_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                if fname.starts_with(pattern) && fname.ends_with(".log") {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            if mtime > newest_mtime {
+                                newest_mtime = mtime;
+                                newest_path = Some(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let lines: Vec<String> = if let Some(log_path) = newest_path {
+        info!("[admin_logs_handler] Reading log file: {:?}", log_path);
+        if let Ok(file) = File::open(&log_path) {
+            let reader = BufReader::new(file);
+            let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+            let total = all_lines.len();
+            let result = if total > 100 {
+                all_lines[total - 100..].to_vec()
+            } else {
+                all_lines
+            };
+            debug!("[admin_logs_handler] Returning {} log lines", result.len());
+            result
         } else {
-            all_lines
-        };
-        debug!("[admin_logs_handler] Returning {} log lines", result.len());
-        result
+            warn!("[admin_logs_handler] Could not open log file: {:?}", log_path);
+            vec!["Could not open log file.".to_string()]
+        }
     } else {
-        warn!("[admin_logs_handler] No log file found at {}", log_path);
+        warn!("[admin_logs_handler] No log files found in {:?}", logs_dir);
         vec!["No log file found.".to_string()]
     };
     info!("[admin_logs_handler] Log fetch complete, {} lines sent", lines.len());
