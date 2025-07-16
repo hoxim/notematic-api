@@ -6,6 +6,7 @@ use flexi_logger::{Logger, Duplicate, Criterion, Naming, Cleanup, FileSpec};
 use actix_web::web::{self};
 use dotenv::dotenv;
 use std::env;
+use std::fs;
 
 mod routes;
 mod models;
@@ -18,32 +19,15 @@ use crate::routes::configure_admin_routes;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // Ensure ./logs directory exists
+    let _ = fs::create_dir_all("./logs");
     // Initialize flexi_logger for file and stdout logging
-    if Logger::try_with_env_or_str("info")
+    Logger::try_with_env_or_str("info")
         .unwrap()
-        .log_to_file(FileSpec::default().directory("/var/log").basename("notematic-api").suffix("log"))
+        .log_to_file(FileSpec::default().directory("./logs").basename("api").suffix("log"))
         .duplicate_to_stdout(Duplicate::Info)
-        .rotate(
-            Criterion::Size(10_000_000), // 10 MB per file
-            Naming::Numbers,
-            Cleanup::KeepLogFiles(7),
-        )
         .start()
-        .is_err()
-    {
-        // Fallback: try current directory if /var/log is not writable
-        Logger::try_with_env_or_str("info")
-            .unwrap()
-            .log_to_file(FileSpec::default().directory(".").basename("notematic-api").suffix("log"))
-            .duplicate_to_stdout(Duplicate::Info)
-            .rotate(
-                Criterion::Size(10_000_000),
-                Naming::Numbers,
-                Cleanup::KeepLogFiles(7),
-            )
-            .start()
-            .expect("Failed to initialize logger in both /var/log and current directory");
-    }
+        .expect("Failed to initialize logger in ./logs");
     
     dotenv().ok(); // load vars form .env
     let port = env::var("API_PORT").unwrap_or_else(|_| "8080".to_string());

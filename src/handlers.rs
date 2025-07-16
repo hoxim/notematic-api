@@ -520,31 +520,19 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
 
 /// Handler for /admin/logs (admin only)
 pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
-    // Try to read from /var/log/notematic-api.log, fallback to ./notematic-api.log
-    let log_paths = ["/var/log/notematic-api.log", "./notematic-api.log"];
-    let mut lines: Vec<String> = Vec::new();
-    let mut found = false;
-    for path in &log_paths {
-        if let Ok(file) = File::open(path) {
-            let reader = BufReader::new(file);
-            // Read all lines into a Vec
-            let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
-            // Take last 100 lines
-            let total = all_lines.len();
-            lines = if total > 100 {
-                all_lines[total - 100..].to_vec()
-            } else {
-                all_lines
-            };
-            found = true;
-            break;
+    let log_path = "./logs/api.log";
+    let lines: Vec<String> = if let Ok(file) = File::open(log_path) {
+        let reader = BufReader::new(file);
+        let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+        let total = all_lines.len();
+        if total > 100 {
+            all_lines[total - 100..].to_vec()
+        } else {
+            all_lines
         }
-    }
-    if !found {
-        return HttpResponse::Ok().json(serde_json::json!({
-            "logs": ["No log file found."]
-        }));
-    }
+    } else {
+        vec!["No log file found.".to_string()]
+    };
     HttpResponse::Ok().json(serde_json::json!({
         "logs": lines
     }))
