@@ -84,6 +84,7 @@ access_expiry = 3600
 refresh_expiry = 2592000
 ```
 
+
 ## 📡 API Endpoints
 
 ### Publiczne
