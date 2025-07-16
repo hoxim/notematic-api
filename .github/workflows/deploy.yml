@@ -2,9 +2,9 @@ name: Build and Deploy API
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
     paths:
-      - 'notematic-api/**'
+      - '**'
   workflow_dispatch:
     inputs:
       force_deploy:
