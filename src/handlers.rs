@@ -13,6 +13,8 @@ use crate::models::{User, LoginRequest, TokenResponse, RefreshTokenRequest, Note
 use crate::utils::{
     generate_access_token,
     generate_refresh_token,
+    generate_access_token_with_role,
+    generate_refresh_token_with_role,
     verify_refresh_token,
     verify_jwt,
     find_user_in_database,
