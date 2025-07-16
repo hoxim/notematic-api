@@ -521,18 +521,23 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
 /// Handler for /admin/logs (admin only)
 pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
     let log_path = "./logs/api.log";
+    info!("[admin_logs_handler] Attempt to fetch logs from {}", log_path);
     let lines: Vec<String> = if let Ok(file) = File::open(log_path) {
         let reader = BufReader::new(file);
         let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
         let total = all_lines.len();
-        if total > 100 {
+        let result = if total > 100 {
             all_lines[total - 100..].to_vec()
         } else {
             all_lines
-        }
+        };
+        debug!("[admin_logs_handler] Returning {} log lines", result.len());
+        result
     } else {
+        warn!("[admin_logs_handler] No log file found at {}", log_path);
         vec!["No log file found.".to_string()]
     };
+    info!("[admin_logs_handler] Log fetch complete, {} lines sent", lines.len());
     HttpResponse::Ok().json(serde_json::json!({
         "logs": lines
     }))
