@@ -1,10 +1,20 @@
 use serde::{Deserialize, Serialize};
 
+/// User role (user/admin)
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum UserRole {
+    #[serde(rename = "user")]
+    User,
+    #[serde(rename = "admin")]
+    Admin,
+}
+
 ///user model
 #[derive(Debug, Serialize, Deserialize)]
 pub struct User {
     pub email: String,
     pub password: String,
+    pub role: Option<UserRole>, // None = user by default
 }
 
 ///Login Request model

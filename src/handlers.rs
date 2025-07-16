@@ -76,10 +76,17 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
     let hashed_password = hash(&user.password, 4).unwrap();
     debug!("Password hashed successfully");
 
+    // Set role to 'user' by default if not provided
+    let user_role = user.role.clone().unwrap_or(crate::models::UserRole::User);
+
     let user_data = json!({
         "_id": user.email.clone(),
         "email": user.email.clone(),
-        "password": hashed_password
+        "password": hashed_password,
+        "role": match user_role {
+            crate::models::UserRole::Admin => "admin",
+            _ => "user",
+        }
     });
 
     debug!("Sending data to CouchDB: {:?}", user_data);
@@ -96,8 +103,8 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
             info!("User registered successfully: {}", user.email);
             
             // Generate tokens for the newly registered user
-            let access_token = generate_access_token(&user.email);
-            let refresh_token = generate_refresh_token(&user.email);
+            let access_token = generate_access_token_with_role(&user.email, &user_role);
+            let refresh_token = generate_refresh_token_with_role(&user.email, &user_role);
             
             let token_response = TokenResponse {
                 access_token,
@@ -151,10 +158,13 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
         Ok(res) if res.status().is_success() => {
             let user_data: serde_json::Value = res.json().await.unwrap();
             let stored_password = user_data["password"].as_str().unwrap();
-
+            let user_role = match user_data["role"].as_str() {
+                Some("admin") => crate::models::UserRole::Admin,
+                _ => crate::models::UserRole::User,
+            };
             if verify(&credentials.password, stored_password).unwrap() {
-                let access_token = generate_access_token(&credentials.email);
-                let refresh_token = generate_refresh_token(&credentials.email);
+                let access_token = generate_access_token_with_role(&credentials.email, &user_role);
+                let refresh_token = generate_refresh_token_with_role(&credentials.email, &user_role);
                 
                 let token_response = TokenResponse {
                     access_token,
@@ -352,13 +362,16 @@ pub async fn get_notebooks_handler(req: HttpRequest) -> HttpResponse {
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
                 if let Ok(claims) = verify_jwt(token) {
+                    debug!("[API] get_notebooks_handler: user={} token_valid", claims.sub);
                     match get_user_notebooks(&claims.sub).await {
                         Ok(notebooks) => {
+                            debug!("[API] get_notebooks_handler: notebooks for user={}: {:?}", claims.sub, notebooks);
                             HttpResponse::Ok().json(json!({
                                 "notebooks": notebooks
                             }))
                         }
                         Err(err) => {
+                            error!("[API] get_notebooks_handler: error for user={}: {}", claims.sub, err);
                             HttpResponse::InternalServerError().json(json!({
                                 "error": "Failed to fetch notebooks",
                                 "message": err
@@ -366,15 +379,19 @@ pub async fn get_notebooks_handler(req: HttpRequest) -> HttpResponse {
                         }
                     }
                 } else {
+                    warn!("[API] get_notebooks_handler: invalid token");
                     HttpResponse::Unauthorized().json(json!({"error": "Invalid token"}))
                 }
             } else {
+                warn!("[API] get_notebooks_handler: invalid Authorization header format");
                 HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header format"}))
             }
         } else {
+            warn!("[API] get_notebooks_handler: invalid Authorization header");
             HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header"}))
         }
     } else {
+        warn!("[API] get_notebooks_handler: missing Authorization header");
         HttpResponse::Unauthorized().json(json!({"error": "Missing Authorization header"}))
     }
 }
@@ -439,7 +456,8 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
         if let Ok(auth_str) = auth_value.to_str() {
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
-                if let Ok(_claims) = verify_jwt(token) {
+                if let Ok(claims) = verify_jwt(token) {
+                    debug!("[API] get_notes_handler: user={} notebook_id={}", claims.sub, notebook_id);
                     // Pobierz query param 'tags' jeśli jest
                     let query_map = web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string()).ok();
                     let tags: Option<Vec<String>> = query_map
@@ -448,6 +466,7 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
                         .map(|tags_str| tags_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
                     match get_notebook_notes(&notebook_id).await {
                         Ok(mut notes) => {
+                            debug!("[API] get_notes_handler: notes for user={} notebook_id={}: {:?}", claims.sub, notebook_id, notes);
                             if let Some(tags) = tags {
                                 notes = notes.into_iter().filter(|note| {
                                     note.get("tags")
@@ -461,6 +480,7 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
                             }))
                         }
                         Err(err) => {
+                            error!("[API] get_notes_handler: error for user={} notebook_id={}: {}", claims.sub, notebook_id, err);
                             HttpResponse::InternalServerError().json(json!({
                                 "error": "Failed to fetch notes",
                                 "message": err
@@ -468,15 +488,26 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
                         }
                     }
                 } else {
+                    warn!("[API] get_notes_handler: invalid token");
                     HttpResponse::Unauthorized().json(json!({"error": "Invalid token"}))
                 }
             } else {
+                warn!("[API] get_notes_handler: invalid Authorization header format");
                 HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header format"}))
             }
         } else {
+            warn!("[API] get_notes_handler: invalid Authorization header");
             HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header"}))
         }
     } else {
+        warn!("[API] get_notes_handler: missing Authorization header");
         HttpResponse::Unauthorized().json(json!({"error": "Missing Authorization header"}))
     }
+}
+
+/// Handler for /admin/logs (admin only)
+pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
+    HttpResponse::Ok().json(serde_json::json!({
+        "logs": ["Log entry 1", "Log entry 2", "Log entry 3"]
+    }))
 }

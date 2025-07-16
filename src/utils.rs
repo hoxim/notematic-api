@@ -9,11 +9,69 @@ use std::time::{Duration, Instant};
 use std::sync::Arc;
 use log::{info, error, warn, debug};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Claims {
     pub sub: String, // user ID
     pub exp: usize,  // expiration date
     pub token_type: String, // "access" or "refresh"
+    pub role: String, // "user" or "admin"
+}
+
+/// Generates an access token with user role
+pub fn generate_access_token_with_role(user_id: &str, role: &crate::models::UserRole) -> String {
+    debug!("Generating access token for user: {} with role: {:?}", user_id, role);
+    let hours: u64 = env::var("ACCESS_TOKEN_LIFETIME_IN_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1); // default 1 hour
+    let exp = chrono::Utc::now().timestamp() as usize + (hours * 3600) as usize;
+    let claims = Claims {
+        sub: user_id.to_string(),
+        exp,
+        token_type: "access".to_string(),
+        role: match role {
+            crate::models::UserRole::Admin => "admin".to_string(),
+            _ => "user".to_string(),
+        },
+    };
+    match encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret("your_secret_key".as_ref()),
+    ) {
+        Ok(token) => {
+            info!("Access token generated successfully for user: {}", user_id);
+            token
+        }
+        Err(e) => {
+            error!("Failed to generate access token for user {}: {}", user_id, e);
+            panic!("JWT encoding failed");
+        }
+    }
+}
+
+/// Generates a refresh token with user role
+pub fn generate_refresh_token_with_role(user_id: &str, role: &crate::models::UserRole) -> String {
+    let hours: u64 = env::var("REFRESH_TOKEN_LIFETIME_IN_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(720); // default 30 days
+    let exp = chrono::Utc::now().timestamp() as usize + (hours * 3600) as usize;
+    let claims = Claims {
+        sub: user_id.to_string(),
+        exp,
+        token_type: "refresh".to_string(),
+        role: match role {
+            crate::models::UserRole::Admin => "admin".to_string(),
+            _ => "user".to_string(),
+        },
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret("your_secret_key".as_ref()),
+    )
+    .unwrap()
 }
 
 pub fn generate_access_token(user_id: &str) -> String {
@@ -27,6 +85,7 @@ pub fn generate_access_token(user_id: &str) -> String {
         sub: user_id.to_string(),
         exp,
         token_type: "access".to_string(),
+        role: "user".to_string(), // Default to user role
     };
     match encode(
         &Header::default(),
@@ -54,6 +113,7 @@ pub fn generate_refresh_token(user_id: &str) -> String {
         sub: user_id.to_string(),
         exp,
         token_type: "refresh".to_string(),
+        role: "user".to_string(), // Default to user role
     };
     encode(
         &Header::default(),
@@ -73,14 +133,13 @@ pub fn get_couchdb_client() -> (reqwest::Client, String, String, String) {
 
 pub fn verify_jwt(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
     debug!("Verifying JWT token");
-    
     match decode::<Claims>(
         token,
         &DecodingKey::from_secret("your_secret_key".as_ref()),
         &Validation::default(),
     ) {
         Ok(data) => {
-            debug!("JWT token verified successfully for user: {}", data.claims.sub);
+            debug!("JWT token verified successfully for user: {} with role: {}", data.claims.sub, data.claims.role);
             Ok(data.claims)
         }
         Err(e) => {
@@ -92,13 +151,11 @@ pub fn verify_jwt(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
 
 pub fn verify_refresh_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
     let claims = verify_jwt(token)?;
-    
     if claims.token_type != "refresh" {
         return Err(jsonwebtoken::errors::Error::from(
             jsonwebtoken::errors::ErrorKind::InvalidToken
         ));
     }
-    
     Ok(claims)
 }
 

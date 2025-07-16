@@ -4,6 +4,7 @@ use crate::handlers::{
     create_notebook_handler, get_notebooks_handler,
     create_note_handler, get_notes_handler,
 };
+use crate::middleware::AdminRoleMiddlewareFactory;
 
 pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -38,5 +39,15 @@ pub fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
         web::resource("/notebooks/{notebook_id}/notes")
             .route(web::post().to(create_note_handler))
             .route(web::get().to(get_notes_handler))
+    );
+}
+
+pub fn configure_admin_routes(cfg: &mut web::ServiceConfig) {
+    cfg.service(
+        web::scope("/admin")
+            .wrap(AdminRoleMiddlewareFactory)
+            .service(
+                web::resource("/logs").route(web::get().to(crate::handlers::admin_logs_handler))
+            )
     );
 }
