@@ -160,8 +160,17 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
             let stored_password = user_data["password"].as_str().unwrap();
             let user_role = match user_data["role"].as_str() {
                 Some("admin") => crate::models::UserRole::Admin,
-                _ => crate::models::UserRole::User,
+                Some("user") => crate::models::UserRole::User,
+                Some(other) => {
+                    debug!("Unknown role '{}' for user {}, defaulting to 'user'", other, credentials.email);
+                    crate::models::UserRole::User
+                },
+                None => {
+                    debug!("No role field for user {}, defaulting to 'user'", credentials.email);
+                    crate::models::UserRole::User
+                }
             };
+            debug!("User {} has role: {:?}", credentials.email, user_role);
             if verify(&credentials.password, stored_password).unwrap() {
                 let access_token = generate_access_token_with_role(&credentials.email, &user_role);
                 let refresh_token = generate_refresh_token_with_role(&credentials.email, &user_role);
