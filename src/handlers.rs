@@ -440,8 +440,22 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
                 if let Ok(_claims) = verify_jwt(token) {
+                    // Pobierz query param 'tags' jeśli jest
+                    let query_map = web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string()).ok();
+                    let tags: Option<Vec<String>> = query_map
+                        .as_ref()
+                        .and_then(|q| q.get("tags"))
+                        .map(|tags_str| tags_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
                     match get_notebook_notes(&notebook_id).await {
-                        Ok(notes) => {
+                        Ok(mut notes) => {
+                            if let Some(tags) = tags {
+                                notes = notes.into_iter().filter(|note| {
+                                    note.get("tags")
+                                        .and_then(|tags_val| tags_val.as_array())
+                                        .map(|tags_arr| tags_arr.iter().any(|t| t.as_str().map(|tag| tags.contains(&tag.to_string())).unwrap_or(false)))
+                                        .unwrap_or(false)
+                                }).collect();
+                            }
                             HttpResponse::Ok().json(json!({
                                 "notes": notes
                             }))
