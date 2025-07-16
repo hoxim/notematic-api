@@ -21,11 +21,10 @@ use crate::routes::configure_admin_routes;
 async fn main() -> std::io::Result<()> {
     // Ensure ./logs directory exists
     let _ = fs::create_dir_all("./logs");
-    // Initialize flexi_logger for file and stdout logging
+    // Initialize flexi_logger for file and stdout logging (single file, no timestamp, no rotation)
     Logger::try_with_env_or_str("info")
         .unwrap()
         .log_to_file(FileSpec::default().directory("./logs").basename("api").suffix("log"))
-        .duplicate_to_stdout(Duplicate::Info)
         .start()
         .expect("Failed to initialize logger in ./logs");
     
