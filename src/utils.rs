@@ -18,13 +18,16 @@ pub struct Claims {
 
 pub fn generate_access_token(user_id: &str) -> String {
     debug!("Generating access token for user: {}", user_id);
-    
+    let hours: u64 = env::var("ACCESS_TOKEN_LIFETIME_IN_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1); // default 1 hour
+    let exp = chrono::Utc::now().timestamp() as usize + (hours * 3600) as usize;
     let claims = Claims {
         sub: user_id.to_string(),
-        exp: chrono::Utc::now().timestamp() as usize + 3600, // Token valid for 1 hour
+        exp,
         token_type: "access".to_string(),
     };
-
     match encode(
         &Header::default(),
         &claims,
@@ -42,12 +45,16 @@ pub fn generate_access_token(user_id: &str) -> String {
 }
 
 pub fn generate_refresh_token(user_id: &str) -> String {
+    let hours: u64 = env::var("REFRESH_TOKEN_LIFETIME_IN_HOURS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(720); // default 30 days
+    let exp = chrono::Utc::now().timestamp() as usize + (hours * 3600) as usize;
     let claims = Claims {
         sub: user_id.to_string(),
-        exp: chrono::Utc::now().timestamp() as usize + 2592000, // Token valid for 30 days
+        exp,
         token_type: "refresh".to_string(),
     };
-
     encode(
         &Header::default(),
         &claims,
