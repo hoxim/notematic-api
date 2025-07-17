@@ -555,7 +555,6 @@ pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
         }
     }
     let lines: Vec<String> = if let Some(log_path) = newest_path {
-        info!("[admin_logs_handler] Reading log file: {:?}", log_path);
         if let Ok(file) = File::open(&log_path) {
             let reader = BufReader::new(file);
             let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
@@ -565,17 +564,13 @@ pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
             } else {
                 all_lines
             };
-            debug!("[admin_logs_handler] Returning {} log lines", result.len());
             result
         } else {
-            warn!("[admin_logs_handler] Could not open log file: {:?}", log_path);
             vec!["Could not open log file.".to_string()]
         }
     } else {
-        warn!("[admin_logs_handler] No log files found in {:?}", logs_dir);
         vec!["No log file found.".to_string()]
     };
-    info!("[admin_logs_handler] Log fetch complete, {} lines sent", lines.len());
     HttpResponse::Ok().json(serde_json::json!({
         "logs": lines
     }))
