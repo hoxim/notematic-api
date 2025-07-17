@@ -198,11 +198,11 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
 }
 
 pub fn configure_routes(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::resource("/users/{username}").route(web::get().to(get_user)));
+    cfg.service(web::resource("/users/{email}").route(web::get().to(get_user)));
 }
 
-async fn get_user(username: web::Path<String>) -> HttpResponse {
-    let user = find_user_in_database(&username).await;
+async fn get_user(email: web::Path<String>) -> HttpResponse {
+    let user = find_user_in_database(&email).await;
     match user {
         Some(u) => HttpResponse::Ok().json(u),
         None => HttpResponse::NotFound().finish(),
@@ -333,7 +333,7 @@ pub async fn create_notebook_handler(notebook: web::Json<Notebook>, req: HttpReq
         }));
     }
     
-    // Get username from JWT token
+    // Get email from JWT token
     let auth_header = req.headers().get("Authorization");
     if let Some(auth_value) = auth_header {
         if let Ok(auth_str) = auth_value.to_str() {
@@ -369,7 +369,7 @@ pub async fn create_notebook_handler(notebook: web::Json<Notebook>, req: HttpReq
 }
 
 pub async fn get_notebooks_handler(req: HttpRequest) -> HttpResponse {
-    // Get username from JWT token
+    // Get email from JWT token
     let auth_header = req.headers().get("Authorization");
     if let Some(auth_value) = auth_header {
         if let Ok(auth_str) = auth_value.to_str() {
@@ -428,7 +428,7 @@ pub async fn create_note_handler(
         }));
     }
     
-    // Get username from JWT token
+    // Get email from JWT token
     let auth_header = req.headers().get("Authorization");
     if let Some(auth_value) = auth_header {
         if let Ok(auth_str) = auth_value.to_str() {
@@ -464,7 +464,7 @@ pub async fn create_note_handler(
 }
 
 pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
-    // Get username from JWT token
+    // Get email from JWT token
     let auth_header = req.headers().get("Authorization");
     if let Some(auth_value) = auth_header {
         if let Ok(auth_str) = auth_value.to_str() {

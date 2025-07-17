@@ -159,12 +159,12 @@ pub fn verify_refresh_token(token: &str) -> Result<Claims, jsonwebtoken::errors:
     Ok(claims)
 }
 
-pub async fn find_user_in_database(username: &str) -> Option<Value> {
+pub async fn find_user_in_database(email: &str) -> Option<Value> {
     let (_client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
 
     let client = Client::new();
     let response = client
-        .get(format!("{}/users/{}", couchdb_url, username))
+        .get(format!("{}/users/{}", couchdb_url, email))
         .basic_auth(couchdb_user, Some(couchdb_password))
         .send()
         .await;
@@ -175,15 +175,12 @@ pub async fn find_user_in_database(username: &str) -> Option<Value> {
     }
 }
 
-pub fn validate_user_input(username: &str, password: &str) -> Result<(), &'static str> {
-    if username.len() < 3 || username.len() > 32 {
-        return Err("Username must be between 3 and 32 characters");
+pub fn validate_user_input(email: &str, password: &str) -> Result<(), &'static str> {
+    if !email.contains('@') {
+        return Err("Invalid email address");
     }
     if password.len() < 8 {
         return Err("Password must be at least 8 characters long");
-    }
-    if !username.chars().all(|c| c.is_alphanumeric()) {
-        return Err("Username must contain only alphanumeric characters");
     }
     Ok(())
 }
@@ -222,16 +219,16 @@ pub fn check_rate_limit(ip: &str, max_requests: u32, window_duration: Duration) 
 }
 
 // Notebook and Note utilities
-pub async fn create_notebook(username: &str, notebook: &serde_json::Value) -> Result<String, String> {
+pub async fn create_notebook(email: &str, notebook: &serde_json::Value) -> Result<String, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
-    let notebook_id = format!("notebook_{}_{}", username, chrono::Utc::now().timestamp());
+    let notebook_id = format!("notebook_{}_{}", email, chrono::Utc::now().timestamp());
     let now = chrono::Utc::now().to_rfc3339();
     
     let notebook_data = serde_json::json!({
         "_id": notebook_id,
         "type": "notebook",
-        "username": username,
+        "email": email,
         "name": notebook["name"],
         "description": notebook["description"],
         "color": notebook["color"],
@@ -257,12 +254,12 @@ pub async fn create_notebook(username: &str, notebook: &serde_json::Value) -> Re
     }
 }
 
-pub async fn get_user_notebooks(username: &str) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_user_notebooks(email: &str) -> Result<Vec<serde_json::Value>, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
     let response = client
-        .get(format!("{}/notebooks/_design/notebooks/_view/by_username", couchdb_url))
-        .query(&[("key", format!("\"{}\"", username))])
+        .get(format!("{}/notebooks/_design/notebooks/_view/by_email", couchdb_url))
+        .query(&[("key", format!("\"{}\"", email))])
         .basic_auth(couchdb_user, Some(couchdb_password))
         .send()
         .await;
@@ -286,7 +283,7 @@ pub async fn get_user_notebooks(username: &str) -> Result<Vec<serde_json::Value>
     }
 }
 
-pub async fn create_note(username: &str, notebook_id: &str, note: &serde_json::Value) -> Result<String, String> {
+pub async fn create_note(email: &str, notebook_id: &str, note: &serde_json::Value) -> Result<String, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
     let note_id = format!("note_{}_{}", notebook_id, chrono::Utc::now().timestamp());
@@ -295,7 +292,7 @@ pub async fn create_note(username: &str, notebook_id: &str, note: &serde_json::V
     let note_data = serde_json::json!({
         "_id": note_id,
         "type": "note",
-        "username": username,
+        "email": email,
         "notebook_id": notebook_id,
         "title": note["title"],
         "content": note["content"],
@@ -367,7 +364,7 @@ async fn update_notebook_note_count(notebook_id: &str) {
             "_id": notebook_id,
             "_rev": notebook["_rev"],
             "type": "notebook",
-            "username": notebook["username"],
+            "email": notebook["email"],
             "name": notebook["name"],
             "description": notebook["description"],
             "color": notebook["color"],
