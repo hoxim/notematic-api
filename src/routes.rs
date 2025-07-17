@@ -49,5 +49,8 @@ pub fn configure_admin_routes(cfg: &mut web::ServiceConfig) {
             .service(
                 web::resource("/logs").route(web::get().to(crate::handlers::admin_logs_handler))
             )
+            .service(
+                web::resource("/logfiles").route(web::get().to(crate::handlers::admin_logfiles_handler))
+            )
     );
 }

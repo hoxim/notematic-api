@@ -580,3 +580,31 @@ pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
         "logs": lines
     }))
 }
+
+/// Handler for /admin/logfiles (admin only)
+pub async fn admin_logfiles_handler(_req: HttpRequest) -> HttpResponse {
+    let logs_dir = "./logs";
+    let pattern = "api_";
+    let mut files: Vec<(String, std::time::SystemTime)> = vec![];
+    if let Ok(entries) = std::fs::read_dir(logs_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
+                if fname.starts_with(pattern) && fname.ends_with(".log") {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            files.push((fname.to_string(), mtime));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Sortuj od najnowszego
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    let result: Vec<_> = files.into_iter().map(|(name, mtime)| {
+        let ts = chrono::DateTime::<chrono::Local>::from(mtime).to_rfc3339();
+        serde_json::json!({"name": name, "modified": ts})
+    }).collect();
+    HttpResponse::Ok().json(serde_json::json!({"logfiles": result}))
+}
