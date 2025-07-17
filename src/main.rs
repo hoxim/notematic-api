@@ -57,6 +57,12 @@ async fn main() -> std::io::Result<()> {
                     .wrap(middleware::JwtMiddlewareFactory)
                     .configure(routes::configure_protected_routes), // protected routes
             )
+            // Chronione endpointy bez prefixu /protected
+            .service(
+                web::scope("")
+                    .wrap(middleware::JwtMiddlewareFactory)
+                    .configure(routes::configure_jwt_protected_routes)
+            )
             .configure(routes::configure_public_routes) // public routes
             .configure(handlers::configure_routes) // endpoint /users/{username}
             .configure(configure_admin_routes) // admin endpoints

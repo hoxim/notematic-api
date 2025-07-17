@@ -42,6 +42,20 @@ pub fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
     );
 }
 
+pub fn configure_jwt_protected_routes(cfg: &mut web::ServiceConfig) {
+    cfg
+        .service(
+            web::resource("/notebooks")
+                .route(web::post().to(create_notebook_handler))
+                .route(web::get().to(get_notebooks_handler))
+        )
+        .service(
+            web::resource("/notebooks/{notebook_id}/notes")
+                .route(web::post().to(create_note_handler))
+                .route(web::get().to(get_notes_handler))
+        );
+}
+
 pub fn configure_admin_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/admin")
