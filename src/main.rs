@@ -21,10 +21,16 @@ use crate::routes::configure_admin_routes;
 async fn main() -> std::io::Result<()> {
     // Ensure ./logs directory exists
     let _ = fs::create_dir_all("./logs");
-    // Initialize flexi_logger for file and stdout logging (single file, no timestamp, no rotation)
+    // Initialize flexi_logger for file and stdout logging (daily rotation, with timestamp in each log line)
     Logger::try_with_env_or_str("info")
         .unwrap()
         .log_to_file(FileSpec::default().directory("./logs").basename("api").suffix("log"))
+        .format_for_files(flexi_logger::detailed_format) // Dodaje timestamp do każdej linii logu
+        .rotate(
+            Criterion::Age(flexi_logger::Age::Day), // rotacja dzienna
+            Naming::Timestamps,                     // nazwy plików z datą
+            Cleanup::KeepLogFiles(7),               // trzymaj max 7 plików logów
+        )
         .start()
         .expect("Failed to initialize logger in ./logs");
     
