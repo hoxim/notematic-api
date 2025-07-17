@@ -373,40 +373,46 @@ pub async fn get_notebooks_handler(req: HttpRequest) -> HttpResponse {
     let auth_header = req.headers().get("Authorization");
     if let Some(auth_value) = auth_header {
         if let Ok(auth_str) = auth_value.to_str() {
+            log::info!("[DEBUG] Authorization header: {}", auth_str);
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
-                if let Ok(claims) = verify_jwt(token) {
-                    debug!("[API] get_notebooks_handler: user={} token_valid", claims.sub);
-                    match get_user_notebooks(&claims.sub).await {
-                        Ok(notebooks) => {
-                            debug!("[API] get_notebooks_handler: notebooks for user={}: {:?}", claims.sub, notebooks);
-                            HttpResponse::Ok().json(json!({
-                                "notebooks": notebooks
-                            }))
-                        }
-                        Err(err) => {
-                            error!("[API] get_notebooks_handler: error for user={}: {}", claims.sub, err);
-                            HttpResponse::InternalServerError().json(json!({
-                                "error": "Failed to fetch notebooks",
-                                "message": err
-                            }))
+                log::info!("[DEBUG] JWT token: {}", token);
+                match verify_jwt(token) {
+                    Ok(claims) => {
+                        log::info!("[API] get_notebooks_handler: user={} (email), endpoint=/notebooks, method=GET", claims.sub);
+                        match get_user_notebooks(&claims.sub).await {
+                            Ok(notebooks) => {
+                                log::info!("[API] get_notebooks_handler: user={} (email), returned {} notebooks", claims.sub, notebooks.len());
+                                debug!("[API] get_notebooks_handler: notebooks for user={}: {:?}", claims.sub, notebooks);
+                                HttpResponse::Ok().json(serde_json::json!({
+                                    "notebooks": notebooks
+                                }))
+                            }
+                            Err(err) => {
+                                log::error!("[API] get_notebooks_handler: error for user={}: {}", claims.sub, err);
+                                HttpResponse::InternalServerError().json(serde_json::json!({
+                                    "error": "Failed to fetch notebooks",
+                                    "message": err
+                                }))
+                            }
                         }
                     }
-                } else {
-                    warn!("[API] get_notebooks_handler: invalid token");
-                    HttpResponse::Unauthorized().json(json!({"error": "Invalid token"}))
+                    Err(e) => {
+                        log::warn!("[API] get_notebooks_handler: invalid token: {}", e);
+                        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid token"}))
+                    }
                 }
             } else {
-                warn!("[API] get_notebooks_handler: invalid Authorization header format");
-                HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header format"}))
+                log::warn!("[API] get_notebooks_handler: invalid Authorization header format: {}", auth_str);
+                HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header format"}))
             }
         } else {
-            warn!("[API] get_notebooks_handler: invalid Authorization header");
-            HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header"}))
+            log::warn!("[API] get_notebooks_handler: invalid Authorization header (not a string)");
+            HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header"}))
         }
     } else {
-        warn!("[API] get_notebooks_handler: missing Authorization header");
-        HttpResponse::Unauthorized().json(json!({"error": "Missing Authorization header"}))
+        log::warn!("[API] get_notebooks_handler: missing Authorization header");
+        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Missing Authorization header"}))
     }
 }
 
@@ -468,54 +474,60 @@ pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest)
     let auth_header = req.headers().get("Authorization");
     if let Some(auth_value) = auth_header {
         if let Ok(auth_str) = auth_value.to_str() {
+            log::info!("[DEBUG] Authorization header: {}", auth_str);
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
-                if let Ok(claims) = verify_jwt(token) {
-                    debug!("[API] get_notes_handler: user={} notebook_id={}", claims.sub, notebook_id);
-                    // Pobierz query param 'tags' jeśli jest
-                    let query_map = web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string()).ok();
-                    let tags: Option<Vec<String>> = query_map
-                        .as_ref()
-                        .and_then(|q| q.get("tags"))
-                        .map(|tags_str| tags_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
-                    match get_notebook_notes(&notebook_id).await {
-                        Ok(mut notes) => {
-                            debug!("[API] get_notes_handler: notes for user={} notebook_id={}: {:?}", claims.sub, notebook_id, notes);
-                            if let Some(tags) = tags {
-                                notes = notes.into_iter().filter(|note| {
-                                    note.get("tags")
-                                        .and_then(|tags_val| tags_val.as_array())
-                                        .map(|tags_arr| tags_arr.iter().any(|t| t.as_str().map(|tag| tags.contains(&tag.to_string())).unwrap_or(false)))
-                                        .unwrap_or(false)
-                                }).collect();
+                log::info!("[DEBUG] JWT token: {}", token);
+                match verify_jwt(token) {
+                    Ok(claims) => {
+                        log::info!("[API] get_notes_handler: user={} (email), endpoint=/notebooks/{}/notes, method=GET", claims.sub, notebook_id);
+                        // Pobierz query param 'tags' jeśli jest
+                        let query_map = web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string()).ok();
+                        let tags: Option<Vec<String>> = query_map
+                            .as_ref()
+                            .and_then(|q| q.get("tags"))
+                            .map(|tags_str| tags_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+                        match get_notebook_notes(&notebook_id).await {
+                            Ok(mut notes) => {
+                                if let Some(tags) = tags {
+                                    notes = notes.into_iter().filter(|note| {
+                                        note.get("tags")
+                                            .and_then(|tags_val| tags_val.as_array())
+                                            .map(|tags_arr| tags_arr.iter().any(|t| t.as_str().map(|tag| tags.contains(&tag.to_string())).unwrap_or(false)))
+                                            .unwrap_or(false)
+                                    }).collect();
+                                }
+                                log::info!("[API] get_notes_handler: user={} (email), notebook_id={}, returned {} notes", claims.sub, notebook_id, notes.len());
+                                debug!("[API] get_notes_handler: notes for user={} notebook_id={}: {:?}", claims.sub, notebook_id, notes);
+                                HttpResponse::Ok().json(serde_json::json!({
+                                    "notes": notes
+                                }))
                             }
-                            HttpResponse::Ok().json(json!({
-                                "notes": notes
-                            }))
-                        }
-                        Err(err) => {
-                            error!("[API] get_notes_handler: error for user={} notebook_id={}: {}", claims.sub, notebook_id, err);
-                            HttpResponse::InternalServerError().json(json!({
-                                "error": "Failed to fetch notes",
-                                "message": err
-                            }))
+                            Err(err) => {
+                                log::error!("[API] get_notes_handler: error for user={} notebook_id={}: {}", claims.sub, notebook_id, err);
+                                HttpResponse::InternalServerError().json(serde_json::json!({
+                                    "error": "Failed to fetch notes",
+                                    "message": err
+                                }))
+                            }
                         }
                     }
-                } else {
-                    warn!("[API] get_notes_handler: invalid token");
-                    HttpResponse::Unauthorized().json(json!({"error": "Invalid token"}))
+                    Err(e) => {
+                        log::warn!("[API] get_notes_handler: invalid token: {}", e);
+                        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid token"}))
+                    }
                 }
             } else {
-                warn!("[API] get_notes_handler: invalid Authorization header format");
-                HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header format"}))
+                log::warn!("[API] get_notes_handler: invalid Authorization header format: {}", auth_str);
+                HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header format"}))
             }
         } else {
-            warn!("[API] get_notes_handler: invalid Authorization header");
-            HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header"}))
+            log::warn!("[API] get_notes_handler: invalid Authorization header (not a string)");
+            HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header"}))
         }
     } else {
-        warn!("[API] get_notes_handler: missing Authorization header");
-        HttpResponse::Unauthorized().json(json!({"error": "Missing Authorization header"}))
+        log::warn!("[API] get_notes_handler: missing Authorization header");
+        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Missing Authorization header"}))
     }
 }
 
