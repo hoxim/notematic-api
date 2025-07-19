@@ -354,30 +354,73 @@ pub async fn get_notebook_notes(notebook_id: &str) -> Result<Vec<serde_json::Val
 
 pub async fn get_all_user_notes(email: &str) -> Result<Vec<serde_json::Value>, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
-    
+
+    // Get all notes for the user
     let response = client
-        .get(format!("{}/notes/_design/notes/_view/by_email", couchdb_url))
-        .query(&[("key", format!("\"{}\"", email))])
-        .basic_auth(couchdb_user, Some(couchdb_password))
+        .get(format!("{}/notes/_design/notes/_view/by_email?key=\"{}\"", couchdb_url, email))
+        .basic_auth(couchdb_user.clone(), Some(couchdb_password.clone()))
         .send()
         .await;
-    
+
     match response {
         Ok(res) if res.status().is_success() => {
-            let data: serde_json::Value = res.json().await.unwrap_or_default();
-            if let Some(rows) = data["rows"].as_array() {
-                let notes: Vec<serde_json::Value> = rows
-                    .iter()
-                    .filter_map(|row| row["value"].as_object().cloned())
-                    .map(|obj| serde_json::Value::Object(obj))
-                    .collect();
-                Ok(notes)
-            } else {
-                Ok(vec![])
+            let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+            let empty_vec = vec![];
+            let rows = data["rows"].as_array().unwrap_or(&empty_vec);
+            let notes: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| row["value"].clone())
+                .collect();
+            Ok(notes)
+        }
+        Ok(res) => {
+            let error_text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            Err(format!("Failed to get notes: {}", error_text))
+        }
+        Err(e) => Err(format!("Error connecting to database: {}", e)),
+    }
+}
+
+/// Delete a note from the database
+pub async fn delete_note(note_id: &str) -> Result<(), String> {
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+
+    // First get the note to get its _rev
+    let get_response = client
+        .get(format!("{}/notes/{}", couchdb_url, note_id))
+        .basic_auth(couchdb_user.clone(), Some(couchdb_password.clone()))
+        .send()
+        .await;
+
+    match get_response {
+        Ok(res) if res.status().is_success() => {
+            let note_data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+            let rev = note_data["_rev"].as_str().ok_or("No _rev field found")?;
+
+            // Delete the note using DELETE with _rev
+            let delete_response = client
+                .delete(format!("{}/notes/{}?rev={}", couchdb_url, note_id, rev))
+                .basic_auth(couchdb_user, Some(couchdb_password))
+                .send()
+                .await;
+
+            match delete_response {
+                Ok(res) if res.status().is_success() => {
+                    info!("Note deleted successfully: {}", note_id);
+                    Ok(())
+                }
+                Ok(res) => {
+                    let error_text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                    Err(format!("Failed to delete note: {}", error_text))
+                }
+                Err(e) => Err(format!("Error deleting note: {}", e)),
             }
         }
-        Ok(_) => Ok(vec![]),
-        Err(err) => Err(err.to_string()),
+        Ok(res) => {
+            let error_text = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            Err(format!("Failed to get note for deletion: {}", error_text))
+        }
+        Err(e) => Err(format!("Error getting note for deletion: {}", e)),
     }
 }
 

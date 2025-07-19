@@ -28,7 +28,8 @@ use crate::utils::{
     get_user_notebooks,
     create_note,
     get_notebook_notes,
-    get_all_user_notes
+    get_all_user_notes,
+    delete_note
 };
 
 #[derive(Deserialize)]
@@ -607,50 +608,107 @@ pub async fn admin_logfiles_handler(_req: HttpRequest) -> HttpResponse {
 
 /// Handler for /protected/notes - get all notes for user
 pub async fn get_all_notes_handler(req: HttpRequest) -> HttpResponse {
-    // Get email from JWT token
     let auth_header = req.headers().get("Authorization");
     if let Some(auth_value) = auth_header {
         if let Ok(auth_str) = auth_value.to_str() {
-            log::info!("[DEBUG] Authorization header: {}", auth_str);
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
-                log::info!("[DEBUG] JWT token: {}", token);
                 match verify_jwt(token) {
                     Ok(claims) => {
-                        log::info!("[API] get_all_notes_handler: user={} (email), endpoint=/protected/notes, method=GET", claims.sub);
-                        
+                        info!("Getting all notes for user: {}", claims.sub);
                         match get_all_user_notes(&claims.sub).await {
                             Ok(notes) => {
-                                log::info!("[API] get_all_notes_handler: user={} (email), returned {} notes", claims.sub, notes.len());
-                                debug!("[API] get_all_notes_handler: notes for user={}: {:?}", claims.sub, notes);
-                                HttpResponse::Ok().json(serde_json::json!({
+                                info!("Successfully retrieved {} notes for user: {}", notes.len(), claims.sub);
+                                HttpResponse::Ok().json(json!({
                                     "notes": notes
                                 }))
                             }
-                            Err(err) => {
-                                log::error!("[API] get_all_notes_handler: error for user={}: {}", claims.sub, err);
-                                HttpResponse::InternalServerError().json(serde_json::json!({
-                                    "error": "Failed to fetch notes",
-                                    "message": err
+                            Err(e) => {
+                                error!("Error getting notes for user {}: {}", claims.sub, e);
+                                HttpResponse::InternalServerError().json(json!({
+                                    "error": "Failed to get notes",
+                                    "message": e
                                 }))
                             }
                         }
                     }
                     Err(e) => {
-                        log::warn!("[API] get_all_notes_handler: invalid token: {}", e);
-                        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid token"}))
+                        warn!("Invalid JWT token: {}", e);
+                        HttpResponse::Unauthorized().json(json!({
+                            "error": "Invalid token",
+                            "message": "Invalid or expired token"
+                        }))
                     }
                 }
             } else {
-                log::warn!("[API] get_all_notes_handler: invalid Authorization header format: {}", auth_str);
-                HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header format"}))
+                HttpResponse::Unauthorized().json(json!({
+                    "error": "Invalid authorization header",
+                    "message": "Authorization header must start with 'Bearer '"
+                }))
             }
         } else {
-            log::warn!("[API] get_all_notes_handler: invalid Authorization header (not a string)");
-            HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header"}))
+            HttpResponse::Unauthorized().json(json!({
+                "error": "Invalid authorization header",
+                "message": "Authorization header must be a valid string"
+            }))
         }
     } else {
-        log::warn!("[API] get_all_notes_handler: missing Authorization header");
-        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Missing Authorization header"}))
+        HttpResponse::Unauthorized().json(json!({
+            "error": "Missing authorization header",
+            "message": "Authorization header is required"
+        }))
+    }
+}
+
+pub async fn delete_note_handler(note_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    let auth_header = req.headers().get("Authorization");
+    if let Some(auth_value) = auth_header {
+        if let Ok(auth_str) = auth_value.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                let token = &auth_str[7..];
+                match verify_jwt(token) {
+                    Ok(claims) => {
+                        info!("Deleting note {} for user: {}", note_id, claims.sub);
+                        match delete_note(&note_id).await {
+                            Ok(_) => {
+                                info!("Successfully deleted note {} for user: {}", note_id, claims.sub);
+                                HttpResponse::Ok().json(json!({
+                                    "message": "Note deleted successfully"
+                                }))
+                            }
+                            Err(e) => {
+                                error!("Error deleting note {} for user {}: {}", note_id, claims.sub, e);
+                                HttpResponse::InternalServerError().json(json!({
+                                    "error": "Failed to delete note",
+                                    "message": e
+                                }))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Invalid JWT token: {}", e);
+                        HttpResponse::Unauthorized().json(json!({
+                            "error": "Invalid token",
+                            "message": "Invalid or expired token"
+                        }))
+                    }
+                }
+            } else {
+                HttpResponse::Unauthorized().json(json!({
+                    "error": "Invalid authorization header",
+                    "message": "Authorization header must start with 'Bearer '"
+                }))
+            }
+        } else {
+            HttpResponse::Unauthorized().json(json!({
+                "error": "Invalid authorization header",
+                "message": "Authorization header must be a valid string"
+            }))
+        }
+    } else {
+        HttpResponse::Unauthorized().json(json!({
+            "error": "Missing authorization header",
+            "message": "Authorization header is required"
+        }))
     }
 }
