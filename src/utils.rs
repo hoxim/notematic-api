@@ -352,6 +352,35 @@ pub async fn get_notebook_notes(notebook_id: &str) -> Result<Vec<serde_json::Val
     }
 }
 
+pub async fn get_all_user_notes(email: &str) -> Result<Vec<serde_json::Value>, String> {
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+    
+    let response = client
+        .get(format!("{}/notes/_design/notes/_view/by_email", couchdb_url))
+        .query(&[("key", format!("\"{}\"", email))])
+        .basic_auth(couchdb_user, Some(couchdb_password))
+        .send()
+        .await;
+    
+    match response {
+        Ok(res) if res.status().is_success() => {
+            let data: serde_json::Value = res.json().await.unwrap_or_default();
+            if let Some(rows) = data["rows"].as_array() {
+                let notes: Vec<serde_json::Value> = rows
+                    .iter()
+                    .filter_map(|row| row["value"].as_object().cloned())
+                    .map(|obj| serde_json::Value::Object(obj))
+                    .collect();
+                Ok(notes)
+            } else {
+                Ok(vec![])
+            }
+        }
+        Ok(_) => Ok(vec![]),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 async fn update_notebook_note_count(notebook_id: &str) {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     

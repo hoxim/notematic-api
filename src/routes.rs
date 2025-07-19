@@ -2,7 +2,7 @@ use actix_web::web;
 use crate::handlers::{
     register, login, refresh_token, protected_endpoint, health_check,
     create_notebook_handler, get_notebooks_handler,
-    create_note_handler, get_notes_handler,
+    create_note_handler, get_notes_handler, get_all_notes_handler,
 };
 use crate::middleware::AdminRoleMiddlewareFactory;
 
@@ -39,6 +39,10 @@ pub fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
         web::resource("/notebooks/{notebook_id}/notes")
             .route(web::post().to(create_note_handler))
             .route(web::get().to(get_notes_handler))
+    )
+    .service(
+        web::resource("/notes")
+            .route(web::get().to(get_all_notes_handler))
     );
 }
 

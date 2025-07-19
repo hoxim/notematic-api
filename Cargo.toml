@@ -22,4 +22,4 @@ log = "0.4"
 env_logger = "0.11"
 uuid = { version = "1.17.0", features = ["v4"] }
 regex = "1"
-flexi_logger = "0.27"
+flexi_logger = "0.31.2"
