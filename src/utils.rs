@@ -222,11 +222,12 @@ pub fn check_rate_limit(ip: &str, max_requests: u32, window_duration: Duration) 
 pub async fn create_notebook(email: &str, notebook: &serde_json::Value) -> Result<String, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
-    let notebook_id = format!("notebook_{}_{}", email, chrono::Utc::now().timestamp());
+    let notebook_uuid = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     
     let notebook_data = serde_json::json!({
-        "_id": notebook_id,
+        "_id": notebook_uuid,
+        "uuid": notebook_uuid,
         "type": "notebook",
         "email": email,
         "name": notebook["name"],
@@ -238,14 +239,14 @@ pub async fn create_notebook(email: &str, notebook: &serde_json::Value) -> Resul
     });
     
     let response = client
-        .put(format!("{}/notebooks/{}", couchdb_url, notebook_id))
+        .put(format!("{}/notebooks/{}", couchdb_url, notebook_uuid))
         .basic_auth(couchdb_user, Some(couchdb_password))
         .json(&notebook_data)
         .send()
         .await;
     
     match response {
-        Ok(res) if res.status().is_success() => Ok(notebook_id),
+        Ok(res) if res.status().is_success() => Ok(notebook_uuid),
         Ok(res) => {
             let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
             Err(error_message)
@@ -283,17 +284,18 @@ pub async fn get_user_notebooks(email: &str) -> Result<Vec<serde_json::Value>, S
     }
 }
 
-pub async fn create_note(email: &str, notebook_id: &str, note: &serde_json::Value) -> Result<String, String> {
+pub async fn create_note(email: &str, notebook_uuid: &str, note: &serde_json::Value) -> Result<String, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
-    let note_id = format!("note_{}_{}", notebook_id, chrono::Utc::now().timestamp());
+    let note_uuid = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     
     let note_data = serde_json::json!({
-        "_id": note_id,
+        "_id": note_uuid,
+        "uuid": note_uuid,
         "type": "note",
         "email": email,
-        "notebook_id": notebook_id,
+        "notebook_id": notebook_uuid,
         "title": note["title"],
         "content": note["content"],
         "tags": note["tags"],
@@ -303,7 +305,7 @@ pub async fn create_note(email: &str, notebook_id: &str, note: &serde_json::Valu
     });
     
     let response = client
-        .put(format!("{}/notes/{}", couchdb_url, note_id))
+        .put(format!("{}/notes/{}", couchdb_url, note_uuid))
         .basic_auth(couchdb_user, Some(couchdb_password))
         .json(&note_data)
         .send()
@@ -312,8 +314,8 @@ pub async fn create_note(email: &str, notebook_id: &str, note: &serde_json::Valu
     match response {
         Ok(res) if res.status().is_success() => {
             // Update notebook note count
-            update_notebook_note_count(notebook_id).await;
-            Ok(note_id)
+            update_notebook_note_count(notebook_uuid).await;
+            Ok(note_uuid)
         }
         Ok(res) => {
             let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
@@ -323,12 +325,12 @@ pub async fn create_note(email: &str, notebook_id: &str, note: &serde_json::Valu
     }
 }
 
-pub async fn get_notebook_notes(notebook_id: &str) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_notebook_notes(notebook_uuid: &str) -> Result<Vec<serde_json::Value>, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
     let response = client
         .get(format!("{}/notes/_design/notes/_view/by_notebook", couchdb_url))
-        .query(&[("key", format!("\"{}\"", notebook_id))])
+        .query(&[("key", format!("\"{}\"", notebook_uuid))])
         .basic_auth(couchdb_user, Some(couchdb_password))
         .send()
         .await;
@@ -382,12 +384,12 @@ pub async fn get_all_user_notes(email: &str) -> Result<Vec<serde_json::Value>, S
 }
 
 /// Delete a note from the database
-pub async fn delete_note(note_id: &str) -> Result<(), String> {
+pub async fn delete_note(note_uuid: &str) -> Result<(), String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
 
     // First get the note to get its _rev
     let get_response = client
-        .get(format!("{}/notes/{}", couchdb_url, note_id))
+        .get(format!("{}/notes/{}", couchdb_url, note_uuid))
         .basic_auth(couchdb_user.clone(), Some(couchdb_password.clone()))
         .send()
         .await;
@@ -399,14 +401,14 @@ pub async fn delete_note(note_id: &str) -> Result<(), String> {
 
             // Delete the note using DELETE with _rev
             let delete_response = client
-                .delete(format!("{}/notes/{}?rev={}", couchdb_url, note_id, rev))
+                .delete(format!("{}/notes/{}?rev={}", couchdb_url, note_uuid, rev))
                 .basic_auth(couchdb_user, Some(couchdb_password))
                 .send()
                 .await;
 
             match delete_response {
                 Ok(res) if res.status().is_success() => {
-                    info!("Note deleted successfully: {}", note_id);
+                    info!("Note deleted successfully: {}", note_uuid);
                     Ok(())
                 }
                 Ok(res) => {
@@ -424,16 +426,16 @@ pub async fn delete_note(note_id: &str) -> Result<(), String> {
     }
 }
 
-async fn update_notebook_note_count(notebook_id: &str) {
+async fn update_notebook_note_count(notebook_uuid: &str) {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
     // Get current notebook
-    if let Ok(notebook) = get_notebook_by_id(notebook_id).await {
+    if let Ok(notebook) = get_notebook_by_id(notebook_uuid).await {
         let current_count = notebook["note_count"].as_u64().unwrap_or(0);
         let now = chrono::Utc::now().to_rfc3339();
         
         let updated_notebook = serde_json::json!({
-            "_id": notebook_id,
+            "_id": notebook_uuid,
             "_rev": notebook["_rev"],
             "type": "notebook",
             "email": notebook["email"],
@@ -446,7 +448,7 @@ async fn update_notebook_note_count(notebook_id: &str) {
         });
         
         let _ = client
-            .put(format!("{}/notebooks/{}", couchdb_url, notebook_id))
+            .put(format!("{}/notebooks/{}", couchdb_url, notebook_uuid))
             .basic_auth(couchdb_user, Some(couchdb_password))
             .json(&updated_notebook)
             .send()
@@ -454,11 +456,11 @@ async fn update_notebook_note_count(notebook_id: &str) {
     }
 }
 
-async fn get_notebook_by_id(notebook_id: &str) -> Result<serde_json::Value, String> {
+async fn get_notebook_by_id(notebook_uuid: &str) -> Result<serde_json::Value, String> {
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
     
     let response = client
-        .get(format!("{}/notebooks/{}", couchdb_url, notebook_id))
+        .get(format!("{}/notebooks/{}", couchdb_url, notebook_uuid))
         .basic_auth(couchdb_user, Some(couchdb_password))
         .send()
         .await;

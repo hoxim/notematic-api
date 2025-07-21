@@ -58,8 +58,8 @@ pub struct Note {
 
 ///Notebook with ID (for responses)
 #[derive(Debug, Serialize, Deserialize)]
-pub struct NotebookWithId {
-    pub id: String,
+pub struct NotebookWithUuid {
+    pub uuid: String,
     pub name: String,
     pub description: Option<String>,
     pub color: Option<String>,
@@ -70,9 +70,9 @@ pub struct NotebookWithId {
 
 ///Note with ID (for responses)
 #[derive(Debug, Serialize, Deserialize)]
-pub struct NoteWithId {
-    pub id: String,
-    pub notebook_id: String,
+pub struct NoteWithUuid {
+    pub uuid: String,
+    pub notebook_uuid: String,
     pub title: String,
     pub content: String,
     pub tags: Option<Vec<String>>,

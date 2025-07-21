@@ -342,11 +342,20 @@ pub async fn create_notebook_handler(notebook: web::Json<Notebook>, req: HttpReq
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
                 if let Ok(claims) = verify_jwt(token) {
-                    match create_notebook(&claims.sub, &serde_json::to_value(&notebook.into_inner()).unwrap()).await {
+                    let notebook_uuid = Uuid::new_v4().to_string();
+                    let notebook_data = serde_json::json!({
+                        "_id": notebook_uuid,
+                        "uuid": notebook_uuid,
+                        "name": notebook.name,
+                        "user": claims.sub,
+                        "created_at": chrono::Utc::now().to_rfc3339(),
+                        "updated_at": chrono::Utc::now().to_rfc3339(),
+                    });
+                    match create_notebook(&claims.sub, &serde_json::to_value(&notebook_data).unwrap()).await {
                         Ok(notebook_id) => {
                             HttpResponse::Created().json(json!({
                                 "message": "Notebook created successfully",
-                                "notebook_id": notebook_id
+                                "uuid": notebook_id
                             }))
                         }
                         Err(err) => {
@@ -443,11 +452,24 @@ pub async fn create_note_handler(
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
                 if let Ok(claims) = verify_jwt(token) {
-                    match create_note(&claims.sub, &notebook_id, &serde_json::to_value(&note.into_inner()).unwrap()).await {
+                    let notebook_id_str = notebook_id.into_inner();
+                    let note_uuid = Uuid::new_v4().to_string();
+                    let note_data = serde_json::json!({
+                        "_id": note_uuid,
+                        "uuid": note_uuid,
+                        "title": note.title,
+                        "content": note.content,
+                        "tags": note.tags,
+                        "notebook": notebook_id_str,
+                        "user": claims.sub,
+                        "created_at": chrono::Utc::now().to_rfc3339(),
+                        "updated_at": chrono::Utc::now().to_rfc3339(),
+                    });
+                    match create_note(&claims.sub, &notebook_id_str, &serde_json::to_value(&note_data).unwrap()).await {
                         Ok(note_id) => {
                             HttpResponse::Created().json(json!({
                                 "message": "Note created successfully",
-                                "note_id": note_id
+                                "uuid": note_id
                             }))
                         }
                         Err(err) => {
