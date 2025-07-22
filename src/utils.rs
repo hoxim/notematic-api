@@ -343,6 +343,8 @@ pub async fn get_notebook_notes(notebook_uuid: &str) -> Result<Vec<serde_json::V
                     .iter()
                     .filter_map(|row| row["value"].as_object().cloned())
                     .map(|obj| serde_json::Value::Object(obj))
+                    // Filtrowanie notatek z deleted: true
+                    .filter(|note| note["deleted"].as_bool().unwrap_or(false) == false)
                     .collect();
                 Ok(notes)
             } else {
@@ -372,6 +374,8 @@ pub async fn get_all_user_notes(email: &str) -> Result<Vec<serde_json::Value>, S
             let notes: Vec<serde_json::Value> = rows
                 .iter()
                 .map(|row| row["value"].clone())
+                // Filtrowanie notatek z deleted: true
+                .filter(|note| note["deleted"].as_bool().unwrap_or(false) == false)
                 .collect();
             Ok(notes)
         }
