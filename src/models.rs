@@ -54,6 +54,7 @@ pub struct Note {
     pub content: String,
     pub tags: Option<Vec<String>>,
     pub is_pinned: Option<bool>,
+    pub notebook_uuid: Option<String>,
 }
 
 ///Notebook with ID (for responses)

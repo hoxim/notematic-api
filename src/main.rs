@@ -1,7 +1,7 @@
 use actix_web::{App, HttpServer, middleware as actix_middleware}; // Alias for Actix Web's built-in middleware
 use actix_cors::Cors;
 use log::info;
-use flexi_logger::{Logger, Duplicate, Criterion, Naming, Cleanup, FileSpec};
+use flexi_logger::{Logger, Criterion, Naming, Cleanup, FileSpec};
 
 use actix_web::web::{self};
 use dotenv::dotenv;
