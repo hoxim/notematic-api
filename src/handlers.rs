@@ -261,6 +261,7 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
                 refresh_token,
                 token_type: "Bearer".to_string(),
                 expires_in: 3600, // 1 hour in seconds
+                api_version: crate::version::API_VERSION.to_string(),
             };
             
             HttpResponse::Ok().json(token_response)
@@ -339,6 +340,7 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
                     refresh_token,
                     token_type: "Bearer".to_string(),
                     expires_in: 3600, // 1 hour in seconds
+                    api_version: crate::version::API_VERSION.to_string(),
                 };
                 
                 HttpResponse::Ok().json(token_response)
@@ -399,6 +401,7 @@ pub async fn refresh_token(request: web::Json<RefreshTokenRequest>, req: HttpReq
                 refresh_token,
                 token_type: "Bearer".to_string(),
                 expires_in: 3600, // 1 hour in seconds
+                api_version: crate::version::API_VERSION.to_string(),
             };
             
             HttpResponse::Ok().json(token_response)
@@ -418,24 +421,23 @@ pub async fn protected_endpoint() -> HttpResponse {
 }
 
 pub async fn health_check() -> HttpResponse {
-    let environment = env::var("RUST_ENV").unwrap_or_else(|_| "development".to_string());
-    let version_base = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string());
-    let patch = env::var("API_PATCH_VERSION").unwrap_or_else(|_| "0".to_string());
-    let version = format!("{}.{}", version_base.trim_end_matches(",0"), patch);
     let api_port = env::var("API_PORT").unwrap_or_else(|_| "8080".to_string());
     let build_hash = env::var("GIT_COMMIT_HASH").unwrap_or_else(|_| "unknown".to_string());
     let build_date = env::var("BUILD_DATE").unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
+    
     // Check database connection
     let db_status = check_database_connection().await;
+    
     // Get system info
     let uptime = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    
     HttpResponse::Ok().json(json!({
         "status": "healthy",
-        "environment": environment,
-        "version": version,
+        "environment": crate::version::API_ENVIRONMENT,
+        "version": crate::version::API_VERSION,
         "build": {
             "hash": build_hash,
             "date": build_date
@@ -900,6 +902,18 @@ pub async fn admin_logs(_req: HttpRequest) -> HttpResponse {
 pub async fn admin_logfiles(_req: HttpRequest) -> HttpResponse {
     // TODO: implement admin logfiles handler
     HttpResponse::Ok().json(json!({
-        "message": "Admin logfiles endpoint - not yet implemented"
+        "message": "Admin logfiles endpoint not yet implemented",
+        "status": "not_implemented"
     }))
+}
+
+// Version handlers
+pub async fn get_api_version() -> HttpResponse {
+    let version_info = crate::version::get_api_version();
+    HttpResponse::Ok().json(version_info)
+}
+
+pub async fn get_api_status() -> HttpResponse {
+    let status_info = crate::version::get_api_status();
+    HttpResponse::Ok().json(status_info)
 }

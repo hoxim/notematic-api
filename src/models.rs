@@ -37,6 +37,7 @@ pub struct TokenResponse {
     pub refresh_token: String,
     pub token_type: String,
     pub expires_in: u64,
+    pub api_version: String,
 }
 
 ///Notebook model
@@ -143,4 +144,23 @@ pub struct ApiLog {
     pub method: String,
     pub status: u16,
     pub duration_ms: u64,
+}
+
+/// API Version information
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ApiVersion {
+    pub version: String,
+    pub build_date: String,
+    pub git_commit: Option<String>,
+    pub environment: String,
+    pub features: Vec<String>,
+}
+
+/// API Status response
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ApiStatus {
+    pub status: String,
+    pub version: ApiVersion,
+    pub uptime: String,
+    pub database_status: String,
 }

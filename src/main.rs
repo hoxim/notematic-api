@@ -13,6 +13,7 @@ mod models;
 mod handlers;
 mod utils;
 mod middleware;
+mod version;
 
 use crate::routes::configure_admin_routes;
 

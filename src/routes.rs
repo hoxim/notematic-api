@@ -13,6 +13,9 @@ use crate::handlers::{
     
     // Admin handlers
     admin_logs, admin_logfiles,
+    
+    // Version handlers
+    get_api_version, get_api_status,
 };
 use crate::middleware::AdminRoleMiddlewareFactory;
 
@@ -20,6 +23,14 @@ pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/health")
             .route(web::get().to(health_check))
+    )
+    .service(
+        web::resource("/version")
+            .route(web::get().to(get_api_version))
+    )
+    .service(
+        web::resource("/status")
+            .route(web::get().to(get_api_status))
     )
     .service(
         web::resource("/register")
