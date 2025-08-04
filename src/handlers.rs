@@ -8,10 +8,10 @@ use std::time::Duration;
 use log::{info, error, warn, debug};
 use uuid::Uuid;
 use regex::Regex;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+// Unused imports removed - will be needed when implementing admin functions
 
 use crate::models::{User, LoginRequest, TokenResponse, RefreshTokenRequest, Notebook, Note};
+use crate::utils::Claims;
 use crate::utils::{
     generate_access_token,
     generate_refresh_token,
@@ -22,14 +22,150 @@ use crate::utils::{
     find_user_in_database,
     get_couchdb_client,
     check_rate_limit,
-    create_notebook,
+    create_notebook as create_notebook_util,
     get_user_notebooks,
     create_note,
     get_notebook_notes,
     get_all_user_notes,
-    delete_note
+    delete_note as delete_note_util
 };
 
+// Rate limiting constants
+const RATE_LIMITS: &[(&str, u32, u64)] = &[
+    ("auth", 5, 60),      // 5/min dla auth
+    ("notebooks", 10, 60), // 10/min dla notebooków
+    ("notes", 20, 60),     // 20/min dla notatek
+    ("sync", 30, 60),      // 30/min dla sync
+];
+
+// Helper functions
+pub fn create_error(error: &str, message: &str, code: &str) -> serde_json::Value {
+    json!({
+        "error": error.to_string(),
+        "message": message.to_string(),
+        "code": code.to_string(),
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    })
+}
+
+pub fn validate_notebook(notebook: &Notebook) -> Result<(), String> {
+    if notebook.name.trim().is_empty() {
+        return Err("Notebook name cannot be empty".to_string());
+    }
+    if notebook.name.len() > 100 {
+        return Err("Notebook name too long (max 100 characters)".to_string());
+    }
+    if let Some(desc) = &notebook.description {
+        if desc.len() > 500 {
+            return Err("Notebook description too long (max 500 characters)".to_string());
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_note(note: &Note) -> Result<(), String> {
+    if note.title.trim().is_empty() {
+        return Err("Note title cannot be empty".to_string());
+    }
+    if note.title.len() > 200 {
+        return Err("Note title too long (max 200 characters)".to_string());
+    }
+    if note.content.len() > 10000 {
+        return Err("Note content too long (max 10000 characters)".to_string());
+    }
+    Ok(())
+}
+
+pub fn log_api_call(user: &str, method: &str, endpoint: &str, status: u16, duration_ms: u64) {
+    info!("API: {} {} {} {} {}ms", user, method, endpoint, status, duration_ms);
+}
+
+// Helper functions do redukcji boilerplate
+pub fn extract_auth_token(req: &HttpRequest) -> Result<String, serde_json::Value> {
+    let auth_header = req.headers().get("Authorization")
+        .ok_or_else(|| create_error("missing_header", "Missing Authorization header", "AUTH_ERROR"))?;
+    
+    let auth_str = auth_header.to_str()
+        .map_err(|_| create_error("invalid_header", "Invalid Authorization header", "AUTH_ERROR"))?;
+    
+    if !auth_str.starts_with("Bearer ") {
+        return Err(create_error("invalid_header", "Invalid Authorization header format", "AUTH_ERROR"));
+    }
+    
+    Ok(auth_str[7..].to_string())
+}
+
+pub fn verify_user_token(token: &str) -> Result<Claims, serde_json::Value> {
+    verify_jwt(token)
+        .map_err(|_| create_error("invalid_token", "Invalid or expired token", "AUTH_ERROR"))
+}
+
+pub fn check_rate_limit_for_operation(peer_addr: &str, operation: &str) -> Result<(), serde_json::Value> {
+    let limits = RATE_LIMITS.iter().find(|(op, _, _)| *op == operation);
+    
+    if let Some((_, limit, window)) = limits {
+        if !check_rate_limit(peer_addr, *limit, Duration::from_secs(*window)) {
+            return Err(create_error(
+                "rate_limit_exceeded",
+                &format!("Too many {} requests, please try again later", operation),
+                "RATE_LIMIT"
+            ));
+        }
+    }
+    
+    Ok(())
+}
+
+pub fn get_peer_address(req: &HttpRequest) -> String {
+    req.peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+// Wrapper dla handlerów z automatycznym auth i rate limiting
+pub async fn with_auth_and_rate_limit<F, Fut>(
+    req: HttpRequest,
+    operation: &str,
+    handler: F
+) -> HttpResponse 
+where
+    F: FnOnce(String, Claims) -> Fut,
+    Fut: std::future::Future<Output = Result<HttpResponse, serde_json::Value>>,
+{
+    let start = std::time::Instant::now();
+    let peer_addr = get_peer_address(&req);
+    
+    // Rate limiting
+    if let Err(error) = check_rate_limit_for_operation(&peer_addr, operation) {
+        return HttpResponse::TooManyRequests().json(error);
+    }
+    
+    // Auth
+    let token = match extract_auth_token(&req) {
+        Ok(token) => token,
+        Err(error) => return HttpResponse::Unauthorized().json(error),
+    };
+    
+    let claims = match verify_user_token(&token) {
+        Ok(claims) => claims,
+        Err(error) => return HttpResponse::Unauthorized().json(error),
+    };
+    
+    // Execute handler
+    let user_id = claims.sub.clone();
+    match handler(peer_addr, claims).await {
+        Ok(response) => {
+            let duration = start.elapsed().as_millis() as u64;
+            log_api_call(&user_id, "UNKNOWN", "UNKNOWN", 200, duration);
+            response
+        }
+        Err(error) => {
+            let duration = start.elapsed().as_millis() as u64;
+            log_api_call(&user_id, "UNKNOWN", "UNKNOWN", 500, duration);
+            HttpResponse::InternalServerError().json(error)
+        }
+    }
+}
 
 pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
     let peer_addr = req.peer_addr()
@@ -42,20 +178,29 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
     // Rate limiting - 5 requests per minute for registration
     if !check_rate_limit(&peer_addr, 5, Duration::from_secs(60)) {
         warn!("Rate limit exceeded for IP: {}", peer_addr);
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many registration attempts, please try again later"
-        }));
+        return HttpResponse::TooManyRequests().json(create_error(
+            "rate_limit_exceeded",
+            "Too many registration attempts, please try again later",
+            "RATE_LIMIT"
+        ));
     }
 
     // Walidacja formatu emaila
     let email_regex = Regex::new(r"^[^@\s]+@[^@\s]+\.[^@\s]+$").unwrap();
     if !email_regex.is_match(&user.email) {
-        return HttpResponse::BadRequest().json(json!({"error": "Invalid email format"}));
+        return HttpResponse::BadRequest().json(create_error(
+            "invalid_email",
+            "Invalid email format",
+            "VALIDATION"
+        ));
     }
 
     if user.password.len() < 8 {
-        return HttpResponse::BadRequest().json(json!({"error": "Password must be at least 8 characters long"}));
+        return HttpResponse::BadRequest().json(create_error(
+            "invalid_password",
+            "Password must be at least 8 characters long",
+            "VALIDATION"
+        ));
     }
 
     let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
@@ -70,7 +215,11 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
     if let Ok(res) = check_response {
         if res.status().is_success() {
             warn!("Email already exists: {}", user.email);
-            return HttpResponse::Conflict().json(json!({"error": "Email already in use"}));
+            return HttpResponse::Conflict().json(create_error(
+                "email_in_use",
+                "Email already in use",
+                "CONFLICT"
+            ));
         }
     }
 
@@ -119,11 +268,19 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
         Ok(res) => {
             let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
             error!("Error during registration: {}", error_message);
-            HttpResponse::InternalServerError().json(json!({"error": error_message}))
+            HttpResponse::InternalServerError().json(create_error(
+                "registration_failed",
+                &error_message,
+                "INTERNAL_ERROR"
+            ))
         }
         Err(err) => {
             error!("Error connecting to CouchDB: {}", err);
-            HttpResponse::InternalServerError().json(json!({"error": err.to_string()}))
+            HttpResponse::InternalServerError().json(create_error(
+                "couchdb_error",
+                &err.to_string(),
+                "INTERNAL_ERROR"
+            ))
         }
     }
 }
@@ -138,10 +295,11 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
     // Rate limiting - 10 requests per minute for login
     if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
         warn!("Rate limit exceeded for login from IP: {}", peer_addr);
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many login attempts, please try again later"
-        }));
+        return HttpResponse::TooManyRequests().json(create_error(
+            "rate_limit_exceeded",
+            "Too many login attempts, please try again later",
+            "RATE_LIMIT"
+        ));
     }
     
     let couchdb_url = env::var("COUCHDB_URL").unwrap();
@@ -185,11 +343,23 @@ pub async fn login(credentials: web::Json<LoginRequest>, req: HttpRequest) -> Ht
                 
                 HttpResponse::Ok().json(token_response)
             } else {
-                HttpResponse::Unauthorized().json(json!({"error": "Invalid credentials"}))
+                HttpResponse::Unauthorized().json(create_error(
+                    "invalid_credentials",
+                    "Invalid credentials",
+                    "AUTH_ERROR"
+                ))
             }
         }
-        Ok(_) => HttpResponse::Unauthorized().json(json!({"error": "User not found"})),
-        Err(err) => HttpResponse::InternalServerError().json(json!({"error": err.to_string()})),
+        Ok(_) => HttpResponse::Unauthorized().json(create_error(
+            "user_not_found",
+            "User not found",
+            "AUTH_ERROR"
+        )),
+        Err(err) => HttpResponse::InternalServerError().json(create_error(
+            "couchdb_error",
+            &err.to_string(),
+            "INTERNAL_ERROR"
+        )),
     }
 }
 
@@ -212,10 +382,11 @@ pub async fn refresh_token(request: web::Json<RefreshTokenRequest>, req: HttpReq
         .unwrap_or_else(|| "unknown".to_string());
     
     if !check_rate_limit(&peer_addr, 20, Duration::from_secs(60)) {
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many refresh token requests, please try again later"
-        }));
+        return HttpResponse::TooManyRequests().json(create_error(
+            "rate_limit_exceeded",
+            "Too many refresh token requests, please try again later",
+            "RATE_LIMIT"
+        ));
     }
     
     match verify_refresh_token(&request.refresh_token) {
@@ -233,9 +404,11 @@ pub async fn refresh_token(request: web::Json<RefreshTokenRequest>, req: HttpReq
             HttpResponse::Ok().json(token_response)
         }
         Err(_) => {
-            HttpResponse::Unauthorized().json(json!({
-                "error": "Invalid refresh token"
-            }))
+            HttpResponse::Unauthorized().json(create_error(
+                "invalid_refresh_token",
+                "Invalid refresh token",
+                "AUTH_ERROR"
+            ))
         }
     }
 }
@@ -315,787 +488,418 @@ async fn check_database_connection() -> DatabaseStatus {
     }
 }
 
-// Notebook handlers
-pub async fn create_notebook_handler(notebook: web::Json<Notebook>, req: HttpRequest) -> HttpResponse {
-    // Rate limiting - 10 requests per minute for notebook creation
-    let peer_addr = req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many notebook creation requests, please try again later"
-        }));
-    }
-    
-    // Get email from JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                if let Ok(claims) = verify_jwt(token) {
-                    let notebook_uuid = Uuid::new_v4().to_string();
-                    let notebook_data = serde_json::json!({
-                        "_id": notebook_uuid,
-                        "uuid": notebook_uuid,
-                        "name": notebook.name,
-                        "user": claims.sub,
-                        "created_at": chrono::Utc::now().to_rfc3339(),
-                        "updated_at": chrono::Utc::now().to_rfc3339(),
-                    });
-                    match create_notebook(&claims.sub, &serde_json::to_value(&notebook_data).unwrap()).await {
-                        Ok(notebook_id) => {
-                            HttpResponse::Created().json(json!({
-                                "message": "Notebook created successfully",
-                                "uuid": notebook_id
-                            }))
-                        }
-                        Err(err) => {
-                            HttpResponse::InternalServerError().json(json!({
-                                "error": "Failed to create notebook",
-                                "message": err
-                            }))
-                        }
-                    }
-                } else {
-                    HttpResponse::Unauthorized().json(json!({"error": "Invalid token"}))
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header format"}))
+// OLD HANDLERS REMOVED - replaced with new simplified handlers below
+
+// Nowe uproszczone handlery
+pub async fn get_notebooks(req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notebooks", |_peer_addr, claims| async move {
+        match get_user_notebooks(&claims.sub).await {
+            Ok(notebooks) => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "notebooks": notebooks,
+                    "count": notebooks.len()
+                })))
             }
-        } else {
-            HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header"}))
+            Err(err) => {
+                Err(create_error(
+                    "fetch_failed",
+                    &format!("Failed to fetch notebooks: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
         }
-    } else {
-        HttpResponse::Unauthorized().json(json!({"error": "Missing Authorization header"}))
-    }
+    }).await
 }
 
-pub async fn get_notebooks_handler(req: HttpRequest) -> HttpResponse {
-    // Get email from JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            log::info!("[DEBUG] Authorization header: {}", auth_str);
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                log::info!("[DEBUG] JWT token: {}", token);
-                match verify_jwt(token) {
-                    Ok(claims) => {
-                        log::info!("[API] get_notebooks_handler: user={} (email), endpoint=/notebooks, method=GET", claims.sub);
-                    match get_user_notebooks(&claims.sub).await {
-                        Ok(notebooks) => {
-                                log::info!("[API] get_notebooks_handler: user={} (email), returned {} notebooks", claims.sub, notebooks.len());
-                            debug!("[API] get_notebooks_handler: notebooks for user={}: {:?}", claims.sub, notebooks);
-                                HttpResponse::Ok().json(serde_json::json!({
-                                "notebooks": notebooks
-                            }))
-                        }
-                        Err(err) => {
-                                log::error!("[API] get_notebooks_handler: error for user={}: {}", claims.sub, err);
-                                HttpResponse::InternalServerError().json(serde_json::json!({
-                                "error": "Failed to fetch notebooks",
-                                "message": err
-                            }))
-                        }
-                    }
-                    }
-                    Err(e) => {
-                        log::warn!("[API] get_notebooks_handler: invalid token: {}", e);
-                        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid token"}))
-                    }
-                }
-            } else {
-                log::warn!("[API] get_notebooks_handler: invalid Authorization header format: {}", auth_str);
-                HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header format"}))
-            }
-        } else {
-            log::warn!("[API] get_notebooks_handler: invalid Authorization header (not a string)");
-            HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header"}))
+pub async fn create_notebook(notebook: web::Json<Notebook>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notebooks", |_peer_addr, claims| async move {
+        // Validate input
+        if let Err(validation_error) = validate_notebook(&notebook) {
+            return Err(create_error("validation_error", &validation_error, "VALIDATION"));
         }
-    } else {
-        log::warn!("[API] get_notebooks_handler: missing Authorization header");
-        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Missing Authorization header"}))
-    }
+        
+        let notebook_uuid = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        
+        let notebook_data = json!({
+            "_id": notebook_uuid,
+            "uuid": notebook_uuid,
+            "name": notebook.name,
+            "description": notebook.description,
+            "color": notebook.color,
+            "user": claims.sub,
+            "created_at": now,
+            "updated_at": now,
+            "version": 1,
+        });
+        
+        match create_notebook_util(&claims.sub, &serde_json::to_value(&notebook_data).unwrap()).await {
+            Ok(notebook_id) => {
+                Ok(HttpResponse::Created().json(json!({
+                    "message": "Notebook created successfully",
+                    "uuid": notebook_id,
+                    "version": 1
+                })))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "creation_failed",
+                    &format!("Failed to create notebook: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
 }
 
-// Note handlers
-pub async fn create_note_handler(
+pub async fn get_all_notes(req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notes", |_peer_addr, claims| async move {
+        match get_all_user_notes(&claims.sub).await {
+            Ok(notes) => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "notes": notes,
+                    "count": notes.len()
+                })))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "fetch_failed",
+                    &format!("Failed to fetch notes: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
+}
+
+pub async fn sync_notes(req: HttpRequest, sync_data: web::Json<crate::models::SyncRequest>) -> HttpResponse {
+    with_auth_and_rate_limit(req, "sync", |_peer_addr, _claims| async move {
+        let sync_timestamp = chrono::Utc::now().to_rfc3339();
+        let conflicts = Vec::new(); // TODO: implement conflict resolution
+        let applied_changes = sync_data.changes.len();
+        
+        let response = crate::models::SyncResponse {
+            sync_timestamp,
+            conflicts,
+            applied_changes,
+        };
+        
+        Ok(HttpResponse::Ok().json(response))
+    }).await
+}
+
+pub async fn sync_notebooks(req: HttpRequest, sync_data: web::Json<crate::models::SyncRequest>) -> HttpResponse {
+    sync_notes(req, sync_data).await
+}
+
+pub async fn get_sync_status(req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "sync", |_peer_addr, _claims| async move {
+        let status = crate::models::SyncStatus {
+            last_sync: None, // TODO: implement last sync tracking
+            device_id: "unknown".to_string(),
+            pending_changes: 0,
+            conflicts: 0,
+        };
+        
+        Ok(HttpResponse::Ok().json(status))
+    }).await
+}
+
+// Rename existing handlers to new names
+pub async fn create_note_in_notebook(
     notebook_id: web::Path<String>,
     note: web::Json<Note>,
     req: HttpRequest
 ) -> HttpResponse {
-    // Rate limiting - 20 requests per minute for note creation
-    let peer_addr = req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    if !check_rate_limit(&peer_addr, 20, Duration::from_secs(60)) {
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many note creation requests, please try again later"
-        }));
-    }
-    
-    // Get email from JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                if let Ok(claims) = verify_jwt(token) {
-                    let notebook_id_str = notebook_id.into_inner();
-                    let note_uuid = Uuid::new_v4().to_string();
-                    let note_data = serde_json::json!({
-                        "_id": note_uuid,
-                        "uuid": note_uuid,
-                        "title": note.title,
-                        "content": note.content,
-                        "tags": note.tags,
-                        "notebook": notebook_id_str,
-                        "user": claims.sub,
-                        "created_at": chrono::Utc::now().to_rfc3339(),
-                        "updated_at": chrono::Utc::now().to_rfc3339(),
-                    });
-                    match create_note(&claims.sub, &notebook_id_str, &serde_json::to_value(&note_data).unwrap()).await {
-                        Ok(note_id) => {
-                            HttpResponse::Created().json(json!({
-                                "message": "Note created successfully",
-                                "uuid": note_id
-                            }))
-                        }
-                        Err(err) => {
-                            HttpResponse::InternalServerError().json(json!({
-                                "error": "Failed to create note",
-                                "message": err
-                            }))
-                        }
-                    }
-                } else {
-                    HttpResponse::Unauthorized().json(json!({"error": "Invalid token"}))
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header format"}))
-            }
-        } else {
-            HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header"}))
+    with_auth_and_rate_limit(req, "notes", |_peer_addr, claims| async move {
+        // Validate input
+        if let Err(validation_error) = validate_note(&note) {
+            return Err(create_error("validation_error", &validation_error, "VALIDATION"));
         }
-    } else {
-        HttpResponse::Unauthorized().json(json!({"error": "Missing Authorization header"}))
-    }
+        
+        let notebook_id_str = notebook_id.into_inner();
+        let note_uuid = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        
+        let note_data = json!({
+            "_id": note_uuid,
+            "uuid": note_uuid,
+            "title": note.title,
+            "content": note.content,
+            "tags": note.tags,
+            "notebook": notebook_id_str,
+            "user": claims.sub,
+            "created_at": now,
+            "updated_at": now,
+            "version": 1,
+        });
+        
+        match create_note(&claims.sub, &notebook_id_str, &serde_json::to_value(&note_data).unwrap()).await {
+            Ok(note_id) => {
+                Ok(HttpResponse::Created().json(json!({
+                    "message": "Note created successfully",
+                    "uuid": note_id,
+                    "version": 1
+                })))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "creation_failed",
+                    &format!("Failed to create note: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
 }
 
-pub async fn get_notes_handler(notebook_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
-    // Get email from JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            log::info!("[DEBUG] Authorization header: {}", auth_str);
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                log::info!("[DEBUG] JWT token: {}", token);
-                match verify_jwt(token) {
-                    Ok(claims) => {
-                        log::info!("[API] get_notes_handler: user={} (email), endpoint=/notebooks/{}/notes, method=GET", claims.sub, notebook_id);
-                    // Pobierz query param 'tags' jeśli jest
-                    let query_map = web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string()).ok();
-                    let tags: Option<Vec<String>> = query_map
-                        .as_ref()
-                        .and_then(|q| q.get("tags"))
-                        .map(|tags_str| tags_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
-                    match get_notebook_notes(&notebook_id).await {
-                        Ok(mut notes) => {
-                            if let Some(tags) = tags {
-                                notes = notes.into_iter().filter(|note| {
-                                    note.get("tags")
-                                        .and_then(|tags_val| tags_val.as_array())
-                                        .map(|tags_arr| tags_arr.iter().any(|t| t.as_str().map(|tag| tags.contains(&tag.to_string())).unwrap_or(false)))
-                                        .unwrap_or(false)
-                                }).collect();
-                            }
-                                log::info!("[API] get_notes_handler: user={} (email), notebook_id={}, returned {} notes", claims.sub, notebook_id, notes.len());
-                                debug!("[API] get_notes_handler: notes for user={} notebook_id={}: {:?}", claims.sub, notebook_id, notes);
-                                HttpResponse::Ok().json(serde_json::json!({
-                                "notes": notes
-                            }))
-                        }
-                        Err(err) => {
-                                log::error!("[API] get_notes_handler: error for user={} notebook_id={}: {}", claims.sub, notebook_id, err);
-                                HttpResponse::InternalServerError().json(serde_json::json!({
-                                "error": "Failed to fetch notes",
-                                "message": err
-                            }))
-                        }
-                    }
-                    }
-                    Err(e) => {
-                        log::warn!("[API] get_notes_handler: invalid token: {}", e);
-                        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid token"}))
-                    }
-                }
-            } else {
-                log::warn!("[API] get_notes_handler: invalid Authorization header format: {}", auth_str);
-                HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header format"}))
+pub async fn get_notes_from_notebook(notebook_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notes", |_peer_addr, _claims| async move {
+        match get_notebook_notes(&notebook_id).await {
+            Ok(notes) => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "notes": notes,
+                    "count": notes.len()
+                })))
             }
-        } else {
-            log::warn!("[API] get_notes_handler: invalid Authorization header (not a string)");
-            HttpResponse::Unauthorized().json(serde_json::json!({"error": "Invalid Authorization header"}))
+            Err(err) => {
+                Err(create_error(
+                    "fetch_failed",
+                    &format!("Failed to fetch notes: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
         }
-    } else {
-        log::warn!("[API] get_notes_handler: missing Authorization header");
-        HttpResponse::Unauthorized().json(serde_json::json!({"error": "Missing Authorization header"}))
-    }
+    }).await
 }
 
-/// Handler for /admin/logs (admin only)
-pub async fn admin_logs_handler(_req: HttpRequest) -> HttpResponse {
-    let logs_dir = "./logs";
-    let pattern = "api_";
-    let mut newest_path: Option<std::path::PathBuf> = None;
-    let mut newest_mtime = std::time::UNIX_EPOCH;
-    if let Ok(entries) = fs::read_dir(logs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                if fname.starts_with(pattern) && fname.ends_with(".log") {
-                    if let Ok(meta) = entry.metadata() {
-                        if let Ok(mtime) = meta.modified() {
-                            if mtime > newest_mtime {
-                                newest_mtime = mtime;
-                                newest_path = Some(path);
-                            }
-                        }
-                    }
-                }
+pub async fn create_note_standalone(note: web::Json<Note>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notes", |_peer_addr, claims| async move {
+        // Validate input
+        if let Err(validation_error) = validate_note(&note) {
+            return Err(create_error("validation_error", &validation_error, "VALIDATION"));
+        }
+        
+        let note_uuid = Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        
+        let notebook_uuid = match note.notebook_uuid.as_ref() {
+            Some(uuid) => uuid,
+            None => {
+                return Err(create_error(
+                    "missing_notebook_uuid",
+                    "Notebook UUID is required",
+                    "VALIDATION"
+                ));
+            }
+        };
+        
+        let note_data = json!({
+            "_id": note_uuid,
+            "uuid": note_uuid,
+            "title": note.title,
+            "content": note.content,
+            "tags": note.tags,
+            "notebook": notebook_uuid,
+            "user": claims.sub,
+            "created_at": now,
+            "updated_at": now,
+            "version": 1,
+        });
+        
+        match create_note(&claims.sub, notebook_uuid, &serde_json::to_value(&note_data).unwrap()).await {
+            Ok(note_id) => {
+                Ok(HttpResponse::Created().json(json!({
+                    "message": "Note created successfully",
+                    "uuid": note_id,
+                    "version": 1
+                })))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "creation_failed",
+                    &format!("Failed to create note: {}", err),
+                    "INTERNAL_ERROR"
+                ))
             }
         }
-    }
-    let lines: Vec<String> = if let Some(log_path) = newest_path {
-        if let Ok(file) = File::open(&log_path) {
-            let reader = BufReader::new(file);
-            let all_lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
-            let total = all_lines.len();
-            let result = if total > 100 {
-                all_lines[total - 100..].to_vec()
-            } else {
-                all_lines
-            };
-            result
-        } else {
-            vec!["Could not open log file.".to_string()]
+    }).await
+}
+
+pub async fn get_note(_note_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notes", |_peer_addr, _claims| async move {
+        // TODO: implement get single note
+        Err(create_error(
+            "not_implemented",
+            "Get single note not yet implemented",
+            "NOT_IMPLEMENTED"
+        ))
+    }).await
+}
+
+pub async fn update_note(note_id: web::Path<String>, note: web::Json<Note>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notes", |_peer_addr, claims| async move {
+        // Validate input
+        if let Err(validation_error) = validate_note(&note) {
+            return Err(create_error("validation_error", &validation_error, "VALIDATION"));
         }
-    } else {
-        vec!["No log file found.".to_string()]
-    };
-    HttpResponse::Ok().json(serde_json::json!({
-        "logs": lines
+        
+        let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+        let now = chrono::Utc::now().to_rfc3339();
+        
+        let note_data = json!({
+            "_id": note_id.as_str(),
+            "uuid": note_id.as_str(),
+            "type": "note",
+            "email": claims.sub,
+            "title": note.title,
+            "content": note.content,
+            "tags": note.tags,
+            "is_pinned": note.is_pinned,
+            "updated_at": now
+        });
+
+        let response = client
+            .put(format!("{}/notes/{}", couchdb_url, note_id.as_str()))
+            .basic_auth(couchdb_user, Some(couchdb_password))
+            .json(&note_data)
+            .send()
+            .await;
+
+        match response {
+            Ok(res) if res.status().is_success() => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "message": "Note updated successfully",
+                    "note_id": note_id.as_str()
+                })))
+            }
+            Ok(res) => {
+                let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                Err(create_error("update_failed", &error_message, "INTERNAL_ERROR"))
+            }
+            Err(err) => {
+                Err(create_error("update_failed", &err.to_string(), "INTERNAL_ERROR"))
+            }
+        }
+    }).await
+}
+
+pub async fn delete_note(note_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notes", |_peer_addr, _claims| async move {
+        match delete_note_util(&note_id).await {
+            Ok(_) => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "message": "Note deleted successfully",
+                    "note_id": note_id.as_str()
+                })))
+            }
+            Err(e) => {
+                Err(create_error(
+                    "deletion_failed",
+                    &format!("Failed to delete note: {}", e),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
+}
+
+pub async fn get_notebook(_notebook_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notebooks", |_peer_addr, _claims| async move {
+        // TODO: implement get single notebook
+        Err(create_error(
+            "not_implemented",
+            "Get single notebook not yet implemented",
+            "NOT_IMPLEMENTED"
+        ))
+    }).await
+}
+
+pub async fn update_notebook(notebook_id: web::Path<String>, notebook: web::Json<Notebook>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notebooks", |_peer_addr, claims| async move {
+        // Validate input
+        if let Err(validation_error) = validate_notebook(&notebook) {
+            return Err(create_error("validation_error", &validation_error, "VALIDATION"));
+        }
+        
+        let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+        let now = chrono::Utc::now().to_rfc3339();
+        
+        let notebook_data = json!({
+            "_id": notebook_id.as_str(),
+            "uuid": notebook_id.as_str(),
+            "type": "notebook",
+            "email": claims.sub,
+            "name": notebook.name,
+            "description": notebook.description,
+            "color": notebook.color,
+            "updated_at": now
+        });
+
+        let response = client
+            .put(format!("{}/notebooks/{}", couchdb_url, notebook_id.as_str()))
+            .basic_auth(couchdb_user, Some(couchdb_password))
+            .json(&notebook_data)
+            .send()
+            .await;
+
+        match response {
+            Ok(res) if res.status().is_success() => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "message": "Notebook updated successfully",
+                    "notebook_id": notebook_id.as_str()
+                })))
+            }
+            Ok(res) => {
+                let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                Err(create_error("update_failed", &error_message, "INTERNAL_ERROR"))
+            }
+            Err(err) => {
+                Err(create_error("update_failed", &err.to_string(), "INTERNAL_ERROR"))
+            }
+        }
+    }).await
+}
+
+pub async fn delete_notebook(notebook_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "notebooks", |_peer_addr, _claims| async move {
+        let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+        
+        let response = client
+            .delete(format!("{}/notebooks/{}", couchdb_url, notebook_id.as_str()))
+            .basic_auth(couchdb_user, Some(couchdb_password))
+            .send()
+            .await;
+
+        match response {
+            Ok(res) if res.status().is_success() => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "message": "Notebook deleted successfully",
+                    "notebook_id": notebook_id.as_str()
+                })))
+            }
+            Ok(res) => {
+                let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                Err(create_error("deletion_failed", &error_message, "INTERNAL_ERROR"))
+            }
+            Err(err) => {
+                Err(create_error("deletion_failed", &err.to_string(), "INTERNAL_ERROR"))
+            }
+        }
+    }).await
+}
+
+// Rename admin handlers
+pub async fn admin_logs(_req: HttpRequest) -> HttpResponse {
+    // TODO: implement admin logs handler
+    HttpResponse::Ok().json(json!({
+        "message": "Admin logs endpoint - not yet implemented"
     }))
 }
 
-/// Handler for /admin/logfiles (admin only)
-pub async fn admin_logfiles_handler(_req: HttpRequest) -> HttpResponse {
-    let logs_dir = "./logs";
-    let pattern = "api_";
-    let mut files: Vec<(String, std::time::SystemTime)> = vec![];
-    if let Ok(entries) = std::fs::read_dir(logs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-                if fname.starts_with(pattern) && fname.ends_with(".log") {
-                    if let Ok(meta) = entry.metadata() {
-                        if let Ok(mtime) = meta.modified() {
-                            files.push((fname.to_string(), mtime));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Sortuj od najnowszego
-    files.sort_by(|a, b| b.1.cmp(&a.1));
-    let result: Vec<_> = files.into_iter().map(|(name, mtime)| {
-        let ts = chrono::DateTime::<chrono::Local>::from(mtime).to_rfc3339();
-        serde_json::json!({"name": name, "modified": ts})
-    }).collect();
-    HttpResponse::Ok().json(serde_json::json!({"logfiles": result}))
-}
-
-/// Handler for /protected/notes - get all notes for user
-pub async fn create_note_without_notebook_handler(
-    note: web::Json<Note>,
-    req: HttpRequest
-) -> HttpResponse {
-    // Rate limiting - 20 requests per minute for note creation
-    let peer_addr = req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    if !check_rate_limit(&peer_addr, 20, Duration::from_secs(60)) {
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many note creation requests, please try again later"
-        }));
-    }
-    
-    // Get email from JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                if let Ok(claims) = verify_jwt(token) {
-                    let note_uuid = Uuid::new_v4().to_string();
-                    let note_data = serde_json::json!({
-                        "_id": note_uuid,
-                        "uuid": note_uuid,
-                        "title": note.title,
-                        "content": note.content,
-                        "tags": note.tags,
-                        "notebook": note.notebook_uuid,
-                        "user": claims.sub,
-                        "created_at": chrono::Utc::now().to_rfc3339(),
-                        "updated_at": chrono::Utc::now().to_rfc3339(),
-                    });
-                    let notebook_uuid = match note.notebook_uuid.as_ref() {
-                        Some(uuid) => uuid,
-                        None => {
-                            return HttpResponse::BadRequest().json(json!({
-                                "error": "Missing notebook_uuid",
-                                "message": "Notebook UUID is required"
-                            }));
-                        }
-                    };
-                    
-                    match create_note(&claims.sub, notebook_uuid, &serde_json::to_value(&note_data).unwrap()).await {
-                        Ok(note_id) => {
-                            HttpResponse::Created().json(json!({
-                                "message": "Note created successfully",
-                                "uuid": note_id
-                            }))
-                        }
-                        Err(err) => {
-                            HttpResponse::InternalServerError().json(json!({
-                                "error": "Failed to create note",
-                                "message": err
-                            }))
-                        }
-                    }
-                } else {
-                    HttpResponse::Unauthorized().json(json!({"error": "Invalid token"}))
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header format"}))
-            }
-        } else {
-            HttpResponse::Unauthorized().json(json!({"error": "Invalid Authorization header"}))
-        }
-    } else {
-        HttpResponse::Unauthorized().json(json!({"error": "Missing Authorization header"}))
-    }
-}
-
-pub async fn get_all_notes_handler(req: HttpRequest) -> HttpResponse {
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                match verify_jwt(token) {
-                    Ok(claims) => {
-                        info!("Getting all notes for user: {}", claims.sub);
-                        match get_all_user_notes(&claims.sub).await {
-                            Ok(notes) => {
-                                info!("Successfully retrieved {} notes for user: {}", notes.len(), claims.sub);
-                                HttpResponse::Ok().json(json!({
-                                    "notes": notes
-                                }))
-                            }
-                            Err(e) => {
-                                error!("Error getting notes for user {}: {}", claims.sub, e);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to get notes",
-                                    "message": e
-                                }))
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Invalid JWT token: {}", e);
-                        HttpResponse::Unauthorized().json(json!({
-                            "error": "Invalid token",
-                            "message": "Invalid or expired token"
-                        }))
-                    }
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({
-                    "error": "Invalid authorization header",
-                    "message": "Authorization header must start with 'Bearer '"
-                }))
-            }
-        } else {
-            HttpResponse::Unauthorized().json(json!({
-                "error": "Invalid authorization header",
-                "message": "Authorization header must be a valid string"
-            }))
-        }
-    } else {
-        HttpResponse::Unauthorized().json(json!({
-            "error": "Missing authorization header",
-            "message": "Authorization header is required"
-        }))
-    }
-}
-
-pub async fn delete_note_handler(note_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
-    let peer_addr = req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    info!("Delete note attempt from IP: {}", peer_addr);
-    debug!("Delete note: note_id={}", note_id);
-
-    // Rate limiting - 10 requests per minute for note operations
-    if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
-        warn!("Rate limit exceeded for IP: {}", peer_addr);
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many note operations, please try again later"
-        }));
-    }
-
-    // Verify JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                match verify_jwt(token) {
-                    Ok(_claims) => {
-                        // Token is valid, proceed with note deletion
-                        match delete_note(&note_id).await {
-                            Ok(_) => {
-                                info!("Note deleted successfully: {}", note_id);
-                                HttpResponse::Ok().json(json!({
-                                    "message": "Note deleted successfully",
-                                    "note_id": note_id.as_str()
-                                }))
-                            }
-                            Err(e) => {
-                                error!("Failed to delete note: {}", e);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to delete note",
-                                    "message": e
-                                }))
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        warn!("Invalid JWT token for note deletion");
-                        HttpResponse::Unauthorized().json(json!({
-                            "error": "Invalid token"
-                        }))
-                    }
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({
-                    "error": "Invalid authorization header format"
-                }))
-            }
-        } else {
-            HttpResponse::Unauthorized().json(json!({
-                "error": "Invalid authorization header"
-            }))
-        }
-    } else {
-        HttpResponse::Unauthorized().json(json!({
-            "error": "Missing authorization header"
-        }))
-    }
-}
-
-pub async fn update_note_handler(
-    note_id: web::Path<String>,
-    note: web::Json<Note>,
-    req: HttpRequest
-) -> HttpResponse {
-    let peer_addr = req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    info!("Update note attempt from IP: {}", peer_addr);
-    debug!("Update note: note_id={}", note_id);
-
-    // Rate limiting - 10 requests per minute for note operations
-    if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
-        warn!("Rate limit exceeded for IP: {}", peer_addr);
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many note operations, please try again later"
-        }));
-    }
-
-    // Verify JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                match verify_jwt(token) {
-                    Ok(claims) => {
-                        // Token is valid, proceed with note update
-                        let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
-                        
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let note_data = json!({
-                            "_id": note_id.as_str(),
-                            "uuid": note_id.as_str(),
-                            "type": "note",
-                            "email": claims.sub,
-                            "title": note.title,
-                            "content": note.content,
-                            "tags": note.tags,
-                            "is_pinned": note.is_pinned,
-                            "updated_at": now
-                        });
-
-                        let response = client
-                            .put(format!("{}/notes/{}", couchdb_url, note_id.as_str()))
-                            .basic_auth(couchdb_user, Some(couchdb_password))
-                            .json(&note_data)
-                            .send()
-                            .await;
-
-                        match response {
-                            Ok(res) if res.status().is_success() => {
-                                info!("Note updated successfully: {}", note_id);
-                                HttpResponse::Ok().json(json!({
-                                    "message": "Note updated successfully",
-                                    "note_id": note_id.as_str()
-                                }))
-                            }
-                            Ok(res) => {
-                                let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                                error!("Failed to update note: {}", error_message);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to update note",
-                                    "message": error_message
-                                }))
-                            }
-                            Err(err) => {
-                                error!("Failed to update note: {}", err);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to update note",
-                                    "message": err.to_string()
-                                }))
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        warn!("Invalid JWT token for note update");
-                        HttpResponse::Unauthorized().json(json!({
-                            "error": "Invalid token"
-                        }))
-                    }
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({
-                    "error": "Invalid authorization header format"
-                }))
-            }
-        } else {
-            HttpResponse::Unauthorized().json(json!({
-                "error": "Invalid authorization header"
-            }))
-        }
-    } else {
-        HttpResponse::Unauthorized().json(json!({
-            "error": "Missing authorization header"
-        }))
-    }
-}
-
-pub async fn update_notebook_handler(
-    notebook_id: web::Path<String>,
-    notebook: web::Json<Notebook>,
-    req: HttpRequest
-) -> HttpResponse {
-    let peer_addr = req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    info!("Update notebook attempt from IP: {}", peer_addr);
-    debug!("Update notebook: notebook_id={}", notebook_id);
-
-    // Rate limiting - 10 requests per minute for notebook operations
-    if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
-        warn!("Rate limit exceeded for IP: {}", peer_addr);
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many notebook operations, please try again later"
-        }));
-    }
-
-    // Verify JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                match verify_jwt(token) {
-                    Ok(claims) => {
-                        // Token is valid, proceed with notebook update
-                        let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
-                        
-                        let now = chrono::Utc::now().to_rfc3339();
-                        let notebook_data = json!({
-                            "_id": notebook_id.as_str(),
-                            "uuid": notebook_id.as_str(),
-                            "type": "notebook",
-                            "email": claims.sub,
-                            "name": notebook.name,
-                            "description": notebook.description,
-                            "color": notebook.color,
-                            "updated_at": now
-                        });
-
-                        let response = client
-                            .put(format!("{}/notebooks/{}", couchdb_url, notebook_id.as_str()))
-                            .basic_auth(couchdb_user, Some(couchdb_password))
-                            .json(&notebook_data)
-                            .send()
-                            .await;
-
-                        match response {
-                            Ok(res) if res.status().is_success() => {
-                                info!("Notebook updated successfully: {}", notebook_id);
-                                HttpResponse::Ok().json(json!({
-                                    "message": "Notebook updated successfully",
-                                    "notebook_id": notebook_id.as_str()
-                                }))
-                            }
-                            Ok(res) => {
-                                let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                                error!("Failed to update notebook: {}", error_message);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to update notebook",
-                                    "message": error_message
-                                }))
-                            }
-                            Err(err) => {
-                                error!("Failed to update notebook: {}", err);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to update notebook",
-                                    "message": err.to_string()
-                                }))
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        warn!("Invalid JWT token for notebook update");
-                        HttpResponse::Unauthorized().json(json!({
-                            "error": "Invalid token"
-                        }))
-                    }
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({
-                    "error": "Invalid authorization header format"
-                }))
-            }
-        } else {
-            HttpResponse::Unauthorized().json(json!({
-                "error": "Invalid authorization header"
-            }))
-        }
-    } else {
-        HttpResponse::Unauthorized().json(json!({
-            "error": "Missing authorization header"
-        }))
-    }
-}
-
-pub async fn delete_notebook_handler(notebook_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
-    let peer_addr = req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-    
-    info!("Delete notebook attempt from IP: {}", peer_addr);
-    debug!("Delete notebook: notebook_id={}", notebook_id);
-
-    // Rate limiting - 10 requests per minute for notebook operations
-    if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
-        warn!("Rate limit exceeded for IP: {}", peer_addr);
-        return HttpResponse::TooManyRequests().json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many notebook operations, please try again later"
-        }));
-    }
-
-    // Verify JWT token
-    let auth_header = req.headers().get("Authorization");
-    if let Some(auth_value) = auth_header {
-        if let Ok(auth_str) = auth_value.to_str() {
-            if auth_str.starts_with("Bearer ") {
-                let token = &auth_str[7..];
-                match verify_jwt(token) {
-                    Ok(_claims) => {
-                        // Token is valid, proceed with notebook deletion
-                        let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
-                        
-                        let response = client
-                            .delete(format!("{}/notebooks/{}", couchdb_url, notebook_id.as_str()))
-                            .basic_auth(couchdb_user, Some(couchdb_password))
-                            .send()
-                            .await;
-
-                        match response {
-                            Ok(res) if res.status().is_success() => {
-                                info!("Notebook deleted successfully: {}", notebook_id);
-                                HttpResponse::Ok().json(json!({
-                                    "message": "Notebook deleted successfully",
-                                    "notebook_id": notebook_id.as_str()
-                                }))
-                            }
-                            Ok(res) => {
-                                let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-                                error!("Failed to delete notebook: {}", error_message);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to delete notebook",
-                                    "message": error_message
-                                }))
-                            }
-                            Err(err) => {
-                                error!("Failed to delete notebook: {}", err);
-                                HttpResponse::InternalServerError().json(json!({
-                                    "error": "Failed to delete notebook",
-                                    "message": err.to_string()
-                                }))
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        warn!("Invalid JWT token for notebook deletion");
-                        HttpResponse::Unauthorized().json(json!({
-                            "error": "Invalid token"
-                        }))
-                    }
-                }
-            } else {
-                HttpResponse::Unauthorized().json(json!({
-                    "error": "Invalid authorization header format"
-                }))
-            }
-        } else {
-            HttpResponse::Unauthorized().json(json!({
-                "error": "Invalid authorization header"
-            }))
-        }
-    } else {
-        HttpResponse::Unauthorized().json(json!({
-            "error": "Missing authorization header"
-        }))
-    }
+pub async fn admin_logfiles(_req: HttpRequest) -> HttpResponse {
+    // TODO: implement admin logfiles handler
+    HttpResponse::Ok().json(json!({
+        "message": "Admin logfiles endpoint - not yet implemented"
+    }))
 }

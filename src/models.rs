@@ -81,3 +81,66 @@ pub struct NoteWithUuid {
     pub created_at: String,
     pub updated_at: String,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SyncRequest {
+    pub last_sync: Option<String>,  // ISO 8601 timestamp
+    pub device_id: String,
+    pub changes: Vec<Change>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Change {
+    pub id: String,
+    pub operation: Operation,
+    pub timestamp: String,
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum Operation {
+    CREATE,
+    UPDATE,
+    DELETE,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SyncResponse {
+    pub sync_timestamp: String,
+    pub conflicts: Vec<Conflict>,
+    pub applied_changes: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Conflict {
+    pub id: String,
+    pub local_version: String,
+    pub server_version: String,
+    pub resolution: Option<String>, // "local", "server", "merge"
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SyncStatus {
+    pub last_sync: Option<String>,
+    pub device_id: String,
+    pub pending_changes: usize,
+    pub conflicts: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ApiError {
+    pub error: String,
+    pub message: String,
+    pub code: String,
+    pub timestamp: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ApiLog {
+    pub timestamp: String,
+    pub user: String,
+    pub endpoint: String,
+    pub method: String,
+    pub status: u16,
+    pub duration_ms: u64,
+}

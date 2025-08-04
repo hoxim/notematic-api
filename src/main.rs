@@ -25,16 +25,16 @@ async fn main() -> std::io::Result<()> {
     Logger::try_with_env_or_str("info")
         .unwrap()
         .log_to_file(FileSpec::default().directory("./logs").basename("api").suffix("log"))
-        .format_for_files(flexi_logger::detailed_format) // Dodaje timestamp do każdej linii logu
+        .format_for_files(flexi_logger::detailed_format) // Add timestamp to each log line
         .rotate(
-            Criterion::Age(flexi_logger::Age::Day), // rotacja dzienna
-            Naming::Timestamps,                     // nazwy plików z datą
-            Cleanup::KeepLogFiles(7),               // trzymaj max 7 plików logów
+            Criterion::Age(flexi_logger::Age::Day), // daily rotation
+            Naming::Timestamps,                     // file names with date
+            Cleanup::KeepLogFiles(7),               // keep max 7 log files
         )
         .start()
         .expect("Failed to initialize logger in ./logs");
     
-    dotenv().ok(); // load vars form .env
+    dotenv().ok(); // load vars from .env
     let port = env::var("API_PORT").unwrap_or_else(|_| "8080".to_string());
 
     info!("Starting Notematic API server");
@@ -53,15 +53,10 @@ async fn main() -> std::io::Result<()> {
             .wrap(actix_middleware::Logger::default()) // Logger for routes
 
             .service(
-                web::scope("/protected") // Middleware only for protected routes
+                web::scope("/protected") // Middleware only for protected routes (JWT)
                     .wrap(middleware::JwtMiddlewareFactory)
                     .configure(routes::configure_protected_routes), // protected routes
             )
-            // .service(
-            //     web::scope("")
-            //         .wrap(middleware::JwtMiddlewareFactory)
-            //         .configure(routes::configure_jwt_protected_routes)
-            // )
             .configure(routes::configure_public_routes) // public routes
             .configure(handlers::configure_routes) // endpoint /users/{username}
             .configure(configure_admin_routes) // admin endpoints

@@ -175,6 +175,7 @@ pub async fn find_user_in_database(email: &str) -> Option<Value> {
     }
 }
 
+#[allow(dead_code)]
 pub fn validate_user_input(email: &str, password: &str) -> Result<(), &'static str> {
     if !email.contains('@') {
         return Err("Invalid email address");
