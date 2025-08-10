@@ -295,7 +295,8 @@ pub async fn create_note(email: &str, notebook_uuid: &str, note: &serde_json::Va
         "_id": note_uuid,
         "uuid": note_uuid,
         "type": "note",
-        "email": email,
+        "user": email,
+        "email": email,  // Keep for backward compatibility
         "notebook_id": notebook_uuid,
         "title": note["title"],
         "content": note["content"],
@@ -498,8 +499,9 @@ pub async fn share_note(
         Ok(res) if res.status().is_success() => {
             let note_data: serde_json::Value = res.json().await.unwrap_or_default();
             
-            // Verify ownership
-            if note_data["user"].as_str() != Some(owner_id) {
+            // Verify ownership - check both "user" and "email" fields for backward compatibility
+            let note_owner = note_data["user"].as_str().or_else(|| note_data["email"].as_str());
+            if note_owner != Some(owner_id) {
                 return Err("Note not found or access denied".to_string());
             }
             
