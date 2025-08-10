@@ -16,6 +16,9 @@ use crate::handlers::{
     
     // Version handlers
     get_api_version, get_api_status,
+    
+    // Sharing handlers
+    share_note_handler, get_shared_notes_handler, get_shared_note_handler, delete_share_handler,
 };
 use crate::middleware::AdminRoleMiddlewareFactory;
 
@@ -93,6 +96,20 @@ pub fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/sync/status")
             .route(web::get().to(get_sync_status))
+    )
+    // Sharing endpoints
+    .service(
+        web::resource("/notes/{note_id}/share")
+            .route(web::post().to(share_note_handler))
+    )
+    .service(
+        web::resource("/shares")
+            .route(web::get().to(get_shared_notes_handler))
+    )
+    .service(
+        web::resource("/shares/{share_id}")
+            .route(web::get().to(get_shared_note_handler))
+            .route(web::delete().to(delete_share_handler))
     );
 }
 

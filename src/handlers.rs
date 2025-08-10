@@ -917,3 +917,98 @@ pub async fn get_api_status() -> HttpResponse {
     let status_info = crate::version::get_api_status();
     HttpResponse::Ok().json(status_info)
 }
+
+// Sharing handlers
+pub async fn share_note_handler(
+    note_id: web::Path<String>,
+    share_request: web::Json<crate::models::ShareRequest>,
+    req: HttpRequest,
+) -> HttpResponse {
+    with_auth_and_rate_limit(req, "shares", |_peer_addr, claims| async move {
+        // Validate input
+        if share_request.note_id != note_id.as_str() {
+            return Err(create_error(
+                "validation_error",
+                "Note ID mismatch",
+                "VALIDATION"
+            ));
+        }
+        
+        match crate::utils::share_note(&note_id, &claims.sub, &share_request).await {
+            Ok(share_id) => {
+                let share_url = format!("{}/shared/{}", crate::version::API_VERSION, share_id);
+                let response = crate::models::ShareResponse {
+                    share_id,
+                    share_url: Some(share_url),
+                    message: "Note shared successfully".to_string(),
+                };
+                
+                Ok(HttpResponse::Created().json(response))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "share_failed",
+                    &format!("Failed to share note: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
+}
+
+pub async fn get_shared_notes_handler(req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "shares", |_peer_addr, claims| async move {
+        match crate::utils::get_shared_notes(&claims.sub).await {
+            Ok(shares) => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "shares": shares,
+                    "count": shares.len()
+                })))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "fetch_failed",
+                    &format!("Failed to fetch shared notes: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
+}
+
+pub async fn get_shared_note_handler(share_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "shares", |_peer_addr, _claims| async move {
+        match crate::utils::get_shared_note_by_id(&share_id).await {
+            Ok(share_data) => {
+                Ok(HttpResponse::Ok().json(share_data))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "fetch_failed",
+                    &format!("Failed to fetch shared note: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
+}
+
+pub async fn delete_share_handler(share_id: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    with_auth_and_rate_limit(req, "shares", |_peer_addr, claims| async move {
+        match crate::utils::delete_share(&share_id, &claims.sub).await {
+            Ok(_) => {
+                Ok(HttpResponse::Ok().json(json!({
+                    "message": "Share deleted successfully",
+                    "share_id": share_id.as_str()
+                })))
+            }
+            Err(err) => {
+                Err(create_error(
+                    "deletion_failed",
+                    &format!("Failed to delete share: {}", err),
+                    "INTERNAL_ERROR"
+                ))
+            }
+        }
+    }).await
+}

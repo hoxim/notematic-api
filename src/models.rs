@@ -164,3 +164,56 @@ pub struct ApiStatus {
     pub uptime: String,
     pub database_status: String,
 }
+/// Share permissions for notes
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SharePermissions {
+    pub can_read: bool,
+    pub can_write: bool,
+    pub can_share: bool,
+    pub can_delete: bool,
+}
+
+/// Share type for notes
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum ShareType {
+    #[serde(rename = "public")]
+    Public,
+    #[serde(rename = "user")]
+    User,
+    #[serde(rename = "email")]
+    Email,
+}
+
+/// Share request model
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShareRequest {
+    pub note_id: String,
+    pub share_type: ShareType,
+    pub permissions: SharePermissions,
+    pub expires_at: Option<String>, // ISO 8601
+    pub password: Option<String>, // for public links
+}
+
+/// Shared note model
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SharedNote {
+    pub share_id: String,
+    pub note_id: String,
+    pub owner_id: String,
+    pub shared_by: String,
+    pub share_type: ShareType,
+    pub permissions: SharePermissions,
+    pub created_at: String,
+    pub expires_at: Option<String>,
+    pub access_count: u32,
+    pub note_title: Option<String>,
+    pub note_content: Option<String>,
+}
+
+/// Share response model
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShareResponse {
+    pub share_id: String,
+    pub share_url: Option<String>,
+    pub message: String,
+}

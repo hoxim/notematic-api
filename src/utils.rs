@@ -476,3 +476,154 @@ async fn get_notebook_by_id(notebook_uuid: &str) -> Result<serde_json::Value, St
         Err(err) => Err(err.to_string()),
     }
 }
+
+// Sharing utilities
+pub async fn share_note(
+    note_id: &str,
+    owner_id: &str,
+    share_request: &crate::models::ShareRequest,
+) -> Result<String, String> {
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+    let share_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    // Get the note first to verify ownership
+    let note_response = client
+        .get(format!("{}/notes/{}", couchdb_url, note_id))
+        .basic_auth(&couchdb_user, Some(&couchdb_password))
+        .send()
+        .await;
+    
+    match note_response {
+        Ok(res) if res.status().is_success() => {
+            let note_data: serde_json::Value = res.json().await.unwrap_or_default();
+            
+            // Verify ownership
+            if note_data["user"].as_str() != Some(owner_id) {
+                return Err("Note not found or access denied".to_string());
+            }
+            
+            let share_data = serde_json::json!({
+                "_id": share_id,
+                "type": "share",
+                "share_id": share_id,
+                "note_id": note_id,
+                "owner_id": owner_id,
+                "shared_by": owner_id,
+                "share_type": share_request.share_type,
+                "permissions": share_request.permissions,
+                "created_at": now,
+                "expires_at": share_request.expires_at,
+                "password": share_request.password,
+                "access_count": 0,
+                "note_title": note_data["title"],
+                "note_content": note_data["content"],
+            });
+            
+            let response = client
+                .put(format!("{}/notes/{}", couchdb_url, share_id))
+                .basic_auth(&couchdb_user, Some(&couchdb_password))
+                .json(&share_data)
+                .send()
+                .await;
+            
+            match response {
+                Ok(res) if res.status().is_success() => Ok(share_id),
+                Ok(res) => {
+                    let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                    Err(error_message)
+                }
+                Err(err) => Err(err.to_string()),
+            }
+        }
+        Ok(_) => Err("Note not found".to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+pub async fn get_shared_notes(user_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+    
+    let response = client
+        .get(format!("{}/notes/_design/shares/_view/by_user", couchdb_url))
+        .query(&[("key", format!("\"{}\"", user_id))])
+        .basic_auth(&couchdb_user, Some(&couchdb_password))
+        .send()
+        .await;
+    
+    match response {
+        Ok(res) if res.status().is_success() => {
+            let data: serde_json::Value = res.json().await.unwrap_or_default();
+            if let Some(rows) = data["rows"].as_array() {
+                let shares: Vec<serde_json::Value> = rows
+                    .iter()
+                    .filter_map(|row| row["value"].as_object().cloned())
+                    .map(|obj| serde_json::Value::Object(obj))
+                    .collect();
+                Ok(shares)
+            } else {
+                Ok(vec![])
+            }
+        }
+        Ok(_) => Ok(vec![]),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+pub async fn get_shared_note_by_id(share_id: &str) -> Result<serde_json::Value, String> {
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+    
+    let response = client
+        .get(format!("{}/notes/{}", couchdb_url, share_id))
+        .basic_auth(&couchdb_user, Some(&couchdb_password))
+        .send()
+        .await;
+    
+    match response {
+        Ok(res) if res.status().is_success() => {
+            let data: serde_json::Value = res.json().await.unwrap_or_default();
+            Ok(data)
+        }
+        Ok(_) => Err("Share not found".to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+pub async fn delete_share(share_id: &str, user_id: &str) -> Result<(), String> {
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+    
+    // First get the share to verify ownership
+    let share_response = client
+        .get(format!("{}/notes/{}", couchdb_url, share_id))
+        .basic_auth(&couchdb_user, Some(&couchdb_password))
+        .send()
+        .await;
+    
+    match share_response {
+        Ok(res) if res.status().is_success() => {
+            let share_data: serde_json::Value = res.json().await.unwrap_or_default();
+            
+            // Verify ownership
+            if share_data["owner_id"].as_str() != Some(user_id) {
+                return Err("Share not found or access denied".to_string());
+            }
+            
+            let response = client
+                .delete(format!("{}/notes/{}", couchdb_url, share_id))
+                .basic_auth(&couchdb_user, Some(&couchdb_password))
+                .send()
+                .await;
+            
+            match response {
+                Ok(res) if res.status().is_success() => Ok(()),
+                Ok(res) => {
+                    let error_message = res.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                    Err(error_message)
+                }
+                Err(err) => Err(err.to_string()),
+            }
+        }
+        Ok(_) => Err("Share not found".to_string()),
+        Err(err) => Err(err.to_string()),
+    }
+}
