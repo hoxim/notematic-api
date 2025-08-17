@@ -10,7 +10,7 @@ use uuid::Uuid;
 use regex::Regex;
 // Unused imports removed - will be needed when implementing admin functions
 
-use crate::models::{User, LoginRequest, TokenResponse, RefreshTokenRequest, Notebook, Note};
+use crate::models::{User, LoginRequest, TokenResponse, RefreshTokenRequest, Notebook, Note, OAuthLoginRequest, AuthProvider, OAuthData};
 use crate::utils::Claims;
 use crate::utils::{
     generate_access_token,
@@ -195,10 +195,18 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
         ));
     }
 
-    if user.password.len() < 8 {
+    if let Some(password) = &user.password {
+        if password.len() < 8 {
+            return HttpResponse::BadRequest().json(create_error(
+                "invalid_password",
+                "Password must be at least 8 characters long",
+                "VALIDATION"
+            ));
+        }
+    } else {
         return HttpResponse::BadRequest().json(create_error(
             "invalid_password",
-            "Password must be at least 8 characters long",
+            "Password is required for local registration",
             "VALIDATION"
         ));
     }
@@ -223,7 +231,7 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
         }
     }
 
-    let hashed_password = hash(&user.password, 4).unwrap();
+    let hashed_password = hash(&user.password.as_ref().unwrap(), 4).unwrap();
     debug!("Password hashed successfully");
 
     // Set role to 'user' by default if not provided
@@ -277,6 +285,139 @@ pub async fn register(user: web::Json<User>, req: HttpRequest) -> HttpResponse {
         }
         Err(err) => {
             error!("Error connecting to CouchDB: {}", err);
+            HttpResponse::InternalServerError().json(create_error(
+                "couchdb_error",
+                &err.to_string(),
+                "INTERNAL_ERROR"
+            ))
+        }
+    }
+}
+
+/// OAuth login handler
+pub async fn oauth_login(oauth_request: web::Json<OAuthLoginRequest>, req: HttpRequest) -> HttpResponse {
+    let peer_addr = req.peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    
+    info!("OAuth login attempt from IP: {} for email: {} with provider: {:?}", 
+          peer_addr, oauth_request.email, oauth_request.provider);
+    
+    // Rate limiting - 10 requests per minute for OAuth login
+    if !check_rate_limit(&peer_addr, 10, Duration::from_secs(60)) {
+        warn!("Rate limit exceeded for OAuth login from IP: {}", peer_addr);
+        return HttpResponse::TooManyRequests().json(create_error(
+            "rate_limit_exceeded",
+            "Too many OAuth login attempts, please try again later",
+            "RATE_LIMIT"
+        ));
+    }
+
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+
+    // TODO: Verify OAuth token with provider (Google, GitHub, Facebook)
+    // For now, we'll trust the token and proceed
+
+    // Check if user exists
+    let response = client
+        .get(format!("{}/users/{}", couchdb_url, oauth_request.email))
+        .basic_auth(couchdb_user.clone(), Some(couchdb_password.clone()))
+        .send()
+        .await;
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            // User exists, check if OAuth provider matches
+            let user_data: serde_json::Value = res.json().await.unwrap();
+            let existing_provider = user_data["auth_provider"].as_str();
+            
+            if let Some(provider) = existing_provider {
+                if provider == format!("{:?}", oauth_request.provider).to_lowercase() {
+                    // Provider matches, generate tokens
+                    let user_role = match user_data["role"].as_str() {
+                        Some("admin") => crate::models::UserRole::Admin,
+                        _ => crate::models::UserRole::User,
+                    };
+                    
+                    let access_token = generate_access_token_with_role(&oauth_request.email, &user_role);
+                    let refresh_token = generate_refresh_token_with_role(&oauth_request.email, &user_role);
+                    
+                    let token_response = TokenResponse {
+                        access_token,
+                        refresh_token,
+                        token_type: "Bearer".to_string(),
+                        expires_in: 3600,
+                        api_version: crate::version::API_VERSION.to_string(),
+                    };
+                    
+                    HttpResponse::Ok().json(token_response)
+                } else {
+                    // Provider mismatch
+                    HttpResponse::Conflict().json(create_error(
+                        "oauth_provider_mismatch",
+                        "Account exists with different OAuth provider",
+                        "CONFLICT"
+                    ))
+                }
+            } else {
+                // User exists but no OAuth provider set
+                HttpResponse::Conflict().json(create_error(
+                    "account_exists",
+                    "Account exists with local authentication",
+                    "CONFLICT"
+                ))
+            }
+        }
+        Ok(_) => {
+            // User doesn't exist, create new OAuth user
+            let user_data = json!({
+                "_id": oauth_request.email.clone(),
+                "email": oauth_request.email.clone(),
+                "password": null, // No password for OAuth users
+                "role": "user",
+                "auth_provider": format!("{:?}", oauth_request.provider).to_lowercase(),
+                "oauth_id": oauth_request.oauth_data.as_ref().map(|d| d.provider_id.clone()),
+                "oauth_data": oauth_request.oauth_data,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "last_login": chrono::Utc::now().to_rfc3339(),
+            });
+
+            let create_response = client
+                .put(format!("{}/users/{}", couchdb_url, oauth_request.email))
+                .basic_auth(couchdb_user, Some(couchdb_password))
+                .json(&user_data)
+                .send()
+                .await;
+
+            match create_response {
+                Ok(res) if res.status().is_success() => {
+                    info!("OAuth user created successfully: {}", oauth_request.email);
+                    
+                    let access_token = generate_access_token_with_role(&oauth_request.email, &crate::models::UserRole::User);
+                    let refresh_token = generate_refresh_token_with_role(&oauth_request.email, &crate::models::UserRole::User);
+                    
+                    let token_response = TokenResponse {
+                        access_token,
+                        refresh_token,
+                        token_type: "Bearer".to_string(),
+                        expires_in: 3600,
+                        api_version: crate::version::API_VERSION.to_string(),
+                    };
+                    
+                    HttpResponse::Ok().json(token_response)
+                }
+                _ => {
+                    error!("Failed to create OAuth user: {}", oauth_request.email);
+                    HttpResponse::InternalServerError().json(create_error(
+                        "oauth_user_creation_failed",
+                        "Failed to create OAuth user",
+                        "INTERNAL_ERROR"
+                    ))
+                }
+            }
+        }
+        Err(err) => {
+            error!("Error connecting to CouchDB during OAuth login: {}", err);
             HttpResponse::InternalServerError().json(create_error(
                 "couchdb_error",
                 &err.to_string(),

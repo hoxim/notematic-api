@@ -9,28 +9,63 @@ pub enum UserRole {
     Admin,
 }
 
-///user model
+/// OAuth provider types
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub enum AuthProvider {
+    #[serde(rename = "local")]
+    Local,
+    #[serde(rename = "google")]
+    Google,
+    #[serde(rename = "github")]
+    GitHub,
+    #[serde(rename = "facebook")]
+    Facebook,
+}
+
+/// OAuth data structure
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OAuthData {
+    pub provider: AuthProvider,
+    pub provider_id: String,
+    pub name: Option<String>,
+    pub picture: Option<String>,
+    pub email_verified: Option<bool>,
+}
+
+/// User model with OAuth support
 #[derive(Debug, Serialize, Deserialize)]
 pub struct User {
     pub email: String,
-    pub password: String,
+    pub password: Option<String>, // Optional for OAuth users
     pub role: Option<UserRole>, // None = user by default
+    pub auth_provider: Option<AuthProvider>, // None = local
+    pub oauth_id: Option<String>,
+    pub oauth_data: Option<OAuthData>,
 }
 
-///Login Request model
+/// Login Request model
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
 }
 
-///Refresh Token Request model
+/// OAuth Login Request model
+#[derive(Debug, Serialize, Deserialize)]
+pub struct OAuthLoginRequest {
+    pub email: String,
+    pub oauth_token: String,
+    pub provider: AuthProvider,
+    pub oauth_data: Option<OAuthData>,
+}
+
+/// Refresh Token Request model
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RefreshTokenRequest {
     pub refresh_token: String,
 }
 
-///Token Response model
+/// Token Response model
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,

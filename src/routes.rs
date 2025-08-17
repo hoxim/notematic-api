@@ -1,7 +1,7 @@
 use actix_web::web;
 use crate::handlers::{
     // Auth handlers
-    register, login, refresh_token, protected_endpoint, health_check,
+    register, login, refresh_token, protected_endpoint, health_check, oauth_login,
     
     // Notebook handlers
     create_notebook, get_notebooks, get_notebook, update_notebook, delete_notebook,
@@ -42,6 +42,10 @@ pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/login")
             .route(web::post().to(login))
+    )
+    .service(
+        web::resource("/oauth/login")
+            .route(web::post().to(oauth_login))
     )
     .service(
         web::resource("/refresh")
