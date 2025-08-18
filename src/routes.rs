@@ -19,6 +19,8 @@ use crate::handlers::{
     
     // Sharing handlers
     share_note_handler, get_shared_notes_handler, get_shared_note_handler, delete_share_handler,
+    // OAuth link handler
+    oauth_link,
 };
 use crate::middleware::AdminRoleMiddlewareFactory;
 
@@ -46,6 +48,10 @@ pub fn configure_public_routes(cfg: &mut web::ServiceConfig) {
     .service(
         web::resource("/oauth/login")
             .route(web::post().to(oauth_login))
+    )
+    .service(
+        web::resource("/oauth/link")
+            .route(web::post().to(oauth_link))
     )
     .service(
         web::resource("/refresh")
