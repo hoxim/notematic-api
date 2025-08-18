@@ -89,6 +89,65 @@ pub fn log_api_call(user: &str, method: &str, endpoint: &str, status: u16, durat
     info!("API: {} {} {} {} {}ms", user, method, endpoint, status, duration_ms);
 }
 
+/// Get current account providers (requires JWT)
+pub async fn get_account(req: HttpRequest) -> HttpResponse {
+    let auth_header = match req.headers().get("Authorization") {
+        Some(h) => h.to_str().ok(),
+        None => None,
+    };
+    if auth_header.is_none() || !auth_header.unwrap().starts_with("Bearer ") {
+        return HttpResponse::Unauthorized().json(create_error(
+            "missing_header",
+            "Missing or invalid Authorization header",
+            "AUTH_ERROR"
+        ));
+    }
+    let token = &auth_header.unwrap()[7..];
+    let claims = match verify_jwt(token) {
+        Ok(c) => c,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(create_error(
+                "invalid_token",
+                "Invalid token",
+                "AUTH_ERROR"
+            ));
+        }
+    };
+
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+    let response = client
+        .get(format!("{}/users/{}", couchdb_url, claims.sub))
+        .basic_auth(couchdb_user, Some(couchdb_password))
+        .send()
+        .await;
+
+    match response {
+        Ok(res) if res.status().is_success() => {
+            let user_data: serde_json::Value = res.json().await.unwrap_or_default();
+            let auth_provider = user_data["auth_provider"].as_str().unwrap_or("local");
+            let has_password = user_data["password"].is_string();
+            let has_google = auth_provider == "google" || user_data["oauth_data"].is_object();
+            let result = serde_json::json!({
+                "email": claims.sub,
+                "providers": {
+                    "local": has_password,
+                    "google": has_google
+                }
+            });
+            HttpResponse::Ok().json(result)
+        }
+        Ok(r) => HttpResponse::NotFound().json(create_error(
+            "user_not_found",
+            &format!("User not found (status: {})", r.status()),
+            "NOT_FOUND"
+        )),
+        Err(e) => HttpResponse::InternalServerError().json(create_error(
+            "couchdb_error",
+            &e.to_string(),
+            "INTERNAL_ERROR"
+        )),
+    }
+}
 /// Link an OAuth provider to the currently authenticated user
 pub async fn oauth_link(link_request: web::Json<OAuthLinkRequest>, req: HttpRequest) -> HttpResponse {
     let peer_addr = req.peer_addr()

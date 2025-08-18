@@ -19,6 +19,8 @@ use crate::handlers::{
     
     // Sharing handlers
     share_note_handler, get_shared_notes_handler, get_shared_note_handler, delete_share_handler,
+    // Account
+    get_account,
     // OAuth link handler
     oauth_link,
 };
@@ -63,6 +65,10 @@ pub fn configure_protected_routes(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::resource("/protected")
             .route(web::get().to(protected_endpoint))
+    )
+    .service(
+        web::resource("/account")
+            .route(web::get().to(get_account))
     )
     // Notebooks - pełny CRUD
     .service(

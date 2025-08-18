@@ -1,7 +1,7 @@
 // Unused imports removed - will be needed for future features
 
 /// API Version constants
-pub const API_VERSION: &str = "1.0.3";
+pub const API_VERSION: &str = "1.0.4";
 #[allow(dead_code)]
 pub const API_BUILD_DATE: &str = env!("CARGO_PKG_VERSION");
 pub const API_ENVIRONMENT: &str = if cfg!(debug_assertions) { "development" } else { "production" };
