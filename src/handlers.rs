@@ -76,10 +76,131 @@ pub fn validate_note(note: &Note) -> Result<(), String> {
     Ok(())
 }
 
+/// OAuth link request (reuse OAuthLoginRequest fields)
+#[derive(Deserialize)]
+pub struct OAuthLinkRequest {
+    pub email: String,
+    pub oauth_token: String,
+    pub provider: AuthProvider,
+    pub oauth_data: Option<OAuthData>,
+}
+
 pub fn log_api_call(user: &str, method: &str, endpoint: &str, status: u16, duration_ms: u64) {
     info!("API: {} {} {} {} {}ms", user, method, endpoint, status, duration_ms);
 }
 
+/// Link an OAuth provider to the currently authenticated user
+pub async fn oauth_link(link_request: web::Json<OAuthLinkRequest>, req: HttpRequest) -> HttpResponse {
+    let peer_addr = req.peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    info!("OAuth link attempt from IP: {} for email: {} with provider: {:?}",
+          peer_addr, link_request.email, link_request.provider);
+
+    // Require valid access token
+    let auth_header = match req.headers().get("Authorization") {
+        Some(h) => h.to_str().ok(),
+        None => None,
+    };
+    if auth_header.is_none() || !auth_header.unwrap().starts_with("Bearer ") {
+        return HttpResponse::Unauthorized().json(create_error(
+            "missing_header",
+            "Missing or invalid Authorization header",
+            "AUTH_ERROR"
+        ));
+    }
+    let token = &auth_header.unwrap()[7..];
+    let claims = match verify_jwt(token) {
+        Ok(c) => c,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(create_error(
+                "invalid_token",
+                "Invalid token",
+                "AUTH_ERROR"
+            ));
+        }
+    };
+
+    // Ensure the linking email matches the authenticated user
+    if claims.sub != link_request.email {
+        return HttpResponse::Forbidden().json(create_error(
+            "email_mismatch",
+            "Authenticated user does not match link email",
+            "FORBIDDEN"
+        ));
+    }
+
+    let (client, couchdb_url, couchdb_user, couchdb_password) = get_couchdb_client();
+
+    // Load user document
+    let user_res = client
+        .get(format!("{}/users/{}", couchdb_url, link_request.email))
+        .basic_auth(couchdb_user.clone(), Some(couchdb_password.clone()))
+        .send()
+        .await;
+
+    match user_res {
+        Ok(res) if res.status().is_success() => {
+            let mut user_doc: serde_json::Value = res.json().await.unwrap_or_default();
+            let rev = user_doc["_rev"].as_str().unwrap_or("").to_string();
+
+            // Set OAuth fields
+            user_doc["auth_provider"] = serde_json::Value::String(format!("{:?}", link_request.provider).to_lowercase());
+            if let Some(ref d) = link_request.oauth_data {
+                user_doc["oauth_id"] = serde_json::Value::String(d.provider_id.clone());
+                user_doc["oauth_data"] = serde_json::to_value(d).unwrap_or(serde_json::Value::Null);
+            }
+
+            // Update doc
+            let mut updated_doc = user_doc.clone();
+            updated_doc["_rev"] = serde_json::Value::String(rev);
+            let put_res = client
+                .put(format!("{}/users/{}", couchdb_url, link_request.email))
+                .basic_auth(couchdb_user, Some(couchdb_password))
+                .json(&updated_doc)
+                .send()
+                .await;
+
+            match put_res {
+                Ok(r) if r.status().is_success() => {
+                    info!("Linked provider for user: {}", link_request.email);
+                    HttpResponse::Ok().json(serde_json::json!({ "status": "linked" }))
+                }
+                Ok(r) => {
+                    let text = r.text().await.unwrap_or_else(|_| "unknown".to_string());
+                    error!("Failed to update user during link: {} => {}", link_request.email, text);
+                    HttpResponse::InternalServerError().json(create_error(
+                        "link_update_failed",
+                        "Failed to link provider",
+                        "INTERNAL_ERROR"
+                    ))
+                }
+                Err(e) => {
+                    error!("Error updating user during link: {} => {}", link_request.email, e);
+                    HttpResponse::InternalServerError().json(create_error(
+                        "link_update_error",
+                        &e.to_string(),
+                        "INTERNAL_ERROR"
+                    ))
+                }
+            }
+        }
+        Ok(_) => HttpResponse::NotFound().json(create_error(
+            "user_not_found",
+            "User not found",
+            "NOT_FOUND"
+        )),
+        Err(e) => {
+            error!("Error fetching user for link: {} => {}", link_request.email, e);
+            HttpResponse::InternalServerError().json(create_error(
+                "couchdb_error",
+                &e.to_string(),
+                "INTERNAL_ERROR"
+            ))
+        }
+    }
+}
 // Helper functions do redukcji boilerplate
 pub fn extract_auth_token(req: &HttpRequest) -> Result<String, serde_json::Value> {
     let auth_header = req.headers().get("Authorization")
